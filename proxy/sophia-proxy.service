@@ -1,0 +1,19 @@
+[Unit]
+Description=Sophia Anthropic-compatible proxy (Claude CLI)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/.sophia
+Environment=PROXY_PORT=8080
+Environment=RUST_LOG=info
+Environment=CLAUDE_CLI=/home/ubuntu/.local/bin/claude
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/.sophia/proxy/target/release/sophia-proxy
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

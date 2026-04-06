@@ -1,0 +1,12 @@
+.env
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+data/dialogs/
+data/users/
+data/memory/MEMORY.md
+.claude/
+proxy/target/
+proxy/.env
+data/queue.db*

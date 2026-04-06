@@ -1,0 +1,15 @@
+[Unit]
+Description=Sophia Telegram Userbot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/.sophia
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 start.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
