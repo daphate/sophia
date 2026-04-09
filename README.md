@@ -72,6 +72,7 @@ UPDATE_CHECK_HOURS=12
 | `EXEC_ENABLED` | Enable `/exec` command (default: `true`) |
 | `EXEC_ALLOWED_COMMANDS` | Comma-separated whitelist of allowed OS commands |
 | `UPDATE_CHECK_HOURS` | How often to check for updates, in hours. `0` = disabled (default: `12`) |
+| `AUTO_UPDATE` | Auto-pull, rebuild and restart on new version (default: `false`) |
 
 ### 3. First run
 
@@ -87,7 +88,9 @@ After authentication the session is saved and subsequent runs won't ask again.
 
 ### 4. Update
 
-Sophia checks for updates automatically (every 12 hours by default). To update manually:
+Sophia checks for updates automatically (every 12 hours by default).
+
+**Manual update:**
 
 ```bash
 cd sophia
@@ -95,9 +98,37 @@ git pull
 cargo build --release
 ```
 
-Then restart the bot.
+Then restart the bot (see below).
 
-### 5. Debug mode
+**Automatic update:** set `AUTO_UPDATE=true` in `.env`. When a new release is found, the bot will pull, rebuild and restart itself (exit code 42 triggers restart by the service manager).
+
+### 5. Restart
+
+**systemd (Linux):**
+
+```bash
+sudo systemctl restart sophia-bot
+```
+
+**launchd (macOS):**
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.sophia.bot
+```
+
+**Windows (NSSM):**
+
+```powershell
+nssm restart Sophia
+```
+
+**Standalone (no service manager):** use the wrapper script:
+
+```bash
+./run.sh
+```
+
+### 6. Debug mode
 
 ```bash
 ./target/release/sophia --debug

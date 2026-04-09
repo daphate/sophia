@@ -24,6 +24,8 @@ pub struct Config {
     pub exec_allowed_commands: Vec<String>,
     /// Update check interval in hours. 0 = disabled.
     pub update_check_hours: u64,
+    /// Automatically pull, rebuild and restart on new version.
+    pub auto_update: bool,
 }
 
 impl Config {
@@ -76,6 +78,10 @@ impl Config {
             .unwrap_or_else(|_| "12".into())
             .parse()
             .unwrap_or(12);
+        let auto_update = std::env::var("AUTO_UPDATE")
+            .unwrap_or_else(|_| "false".into())
+            .to_lowercase()
+            == "true";
 
         Ok(Self {
             api_id,
@@ -88,6 +94,7 @@ impl Config {
             exec_enabled,
             exec_allowed_commands,
             update_check_hours,
+            auto_update,
         })
     }
 }

@@ -1,5 +1,5 @@
 [Unit]
-Description=Sophia Telegram Userbot
+Description=Sophia Telegram Bot
 After=network.target
 
 [Service]
@@ -9,7 +9,8 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/sophia
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/home/ubuntu/sophia/target/release/sophia
-Restart=on-failure
+# Restart always: on failure AND on exit code 42 (auto-update)
+Restart=always
 RestartSec=5
 
 [Install]

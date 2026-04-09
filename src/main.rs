@@ -15,6 +15,7 @@ use grammers_client::client::{Client, UpdatesConfiguration};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use tokio::sync::broadcast;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info};
 
 use crate::config::Config;
@@ -167,19 +168,31 @@ async fn main() -> Result<()> {
     });
 
     // Periodic update check
+    let needs_restart = Arc::new(AtomicBool::new(false));
     if config.update_check_hours > 0 {
         let interval_secs = config.update_check_hours * 3600;
+        let auto_update = config.auto_update;
+        let needs_restart = needs_restart.clone();
+        let shutdown_tx_update = shutdown_tx.clone();
         let mut shutdown_rx_updates = shutdown_tx.subscribe();
         tokio::spawn(async move {
             // Check immediately on startup
-            update_check::check_for_updates().await;
+            if update_check::check_for_updates(auto_update).await {
+                needs_restart.store(true, Ordering::SeqCst);
+                let _ = shutdown_tx_update.send(());
+                return;
+            }
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             interval.tick().await; // skip first (already checked)
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        update_check::check_for_updates().await;
+                        if update_check::check_for_updates(auto_update).await {
+                            needs_restart.store(true, Ordering::SeqCst);
+                            let _ = shutdown_tx_update.send(());
+                            break;
+                        }
                     }
                     _ = shutdown_rx_updates.recv() => break,
                 }
@@ -236,6 +249,12 @@ async fn main() -> Result<()> {
 
     // Sync updates state before exit
     update_stream.sync_update_state().await;
+
+    if needs_restart.load(Ordering::SeqCst) {
+        info!("Restarting after auto-update...");
+        std::process::exit(update_check::EXIT_CODE_RESTART);
+    }
+
     info!("Sophia stopped.");
     Ok(())
 }
