@@ -11,7 +11,23 @@ use tracing::{debug, info, warn};
 use crate::config;
 
 const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
-const TG_MAX_LEN: usize = 4096;
+pub const TG_MAX_CHARS: usize = 4096;
+/// Streaming split threshold (slightly below limit to avoid edge cases).
+pub const TG_STREAM_CHARS: usize = 3900;
+
+/// Find byte offset for the given char count limit.
+/// Returns the byte position at which `char_limit` characters end.
+pub fn byte_offset_at_char(text: &str, char_limit: usize) -> usize {
+    text.char_indices()
+        .nth(char_limit)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
+
+/// Number of characters (not bytes) in a string.
+pub fn char_len(text: &str) -> usize {
+    text.chars().count()
+}
 
 /// Set a reaction emoji on a message.
 pub async fn react(client: &Client, peer: PeerRef, msg_id: i32, emoji: &str) {
@@ -36,11 +52,8 @@ pub async fn react(client: &Client, peer: PeerRef, msg_id: i32, emoji: &str) {
 
 /// Edit an existing message.
 pub async fn edit_message(client: &Client, peer: PeerRef, msg_id: i32, text: &str) -> Result<()> {
-    let truncated = if text.len() > TG_MAX_LEN {
-        let mut end = TG_MAX_LEN;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
+    let truncated = if char_len(text) > TG_MAX_CHARS {
+        let end = byte_offset_at_char(text, TG_MAX_CHARS);
         &text[..end]
     } else {
         text
@@ -63,15 +76,16 @@ pub async fn send_and_get_id(client: &Client, peer: PeerRef, text: &str) -> Resu
 pub async fn send_long(client: &Client, peer: PeerRef, text: &str) -> Result<()> {
     let mut remaining = text;
     while !remaining.is_empty() {
-        if remaining.len() <= TG_MAX_LEN {
+        if char_len(remaining) <= TG_MAX_CHARS {
             client
                 .send_message(peer, InputMessage::new().text(remaining))
                 .await?;
             break;
         }
-        let split_at = remaining[..TG_MAX_LEN]
+        let byte_limit = byte_offset_at_char(remaining, TG_MAX_CHARS);
+        let split_at = remaining[..byte_limit]
             .rfind('\n')
-            .unwrap_or(TG_MAX_LEN);
+            .unwrap_or(byte_limit);
         client
             .send_message(peer, InputMessage::new().text(&remaining[..split_at]))
             .await?;

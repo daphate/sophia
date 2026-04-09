@@ -9,7 +9,7 @@ use grammers_client::update::Update;
 use grammers_session::types::{PeerId, PeerKind, PeerRef};
 use regex::Regex;
 use tokio::sync::{broadcast, Mutex};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::inference;
@@ -18,6 +18,7 @@ use crate::pairing;
 use crate::queue::MessageQueue;
 use crate::telegram;
 use crate::update_check::{self, UpdateState};
+use crate::vecstore::VecStore;
 
 /// Shared state for per-user locks.
 pub type UserLocks = Arc<DashMap<i64, Arc<Mutex<()>>>>;
@@ -42,6 +43,7 @@ pub async fn handle_update(
     user_locks: &UserLocks,
     update_state: &UpdateState,
     shutdown_tx: &broadcast::Sender<()>,
+    vecstore: &Arc<VecStore>,
 ) -> Result<()> {
     match update {
         Update::NewMessage(message) => {
@@ -75,7 +77,7 @@ pub async fn handle_update(
 
             handle_private_message(
                 client, &message, config, sender_id, peer, queue, user_locks,
-                update_state, shutdown_tx,
+                update_state, shutdown_tx, vecstore,
             )
             .await
         }
@@ -93,6 +95,7 @@ async fn handle_private_message(
     user_locks: &UserLocks,
     update_state: &UpdateState,
     shutdown_tx: &broadcast::Sender<()>,
+    vecstore: &Arc<VecStore>,
 ) -> Result<()> {
     let text = message.text().trim().to_string();
     let has_media = message.media().is_some();
@@ -124,6 +127,8 @@ async fn handle_private_message(
             "/update" if is_owner => {
                 return handle_update_cmd(client, peer, update_state, shutdown_tx).await;
             }
+            "/search" if is_owner => return handle_search(client, peer, arg, vecstore).await,
+            "/reindex" if is_owner => return handle_reindex(client, peer, vecstore).await,
             "/help" if is_owner || pairing::is_paired(sender_id) => {
                 return handle_help(client, peer, is_owner).await;
             }
@@ -208,7 +213,7 @@ async fn handle_private_message(
     telegram::react(client, peer, last_msg_id, "🫡").await;
 
     let result = process_message(
-        client, config, peer, last_msg_id, sender_id, &combined_text, &all_file_paths,
+        client, config, peer, last_msg_id, sender_id, &combined_text, &all_file_paths, vecstore,
     )
     .await;
 
@@ -232,12 +237,20 @@ async fn process_message(
     sender_id: i64,
     text: &str,
     file_paths: &[PathBuf],
+    vecstore: &Arc<VecStore>,
 ) -> Result<()> {
-    // Log user message (caller holds user lock, no inner lock needed)
+    // Log user message and index it in vecstore
     {
-        let text = text.to_string();
-        tokio::task::spawn_blocking(move || memory::append_dialog(sender_id, "User", &text))
-            .await?;
+        let text_clone = text.to_string();
+        let vs = Arc::clone(vecstore);
+        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        tokio::task::spawn_blocking(move || {
+            memory::append_dialog(sender_id, "User", &text_clone);
+            if let Err(e) = vs.add(&text_clone, "User", sender_id, &ts) {
+                warn!("Failed to index user message: {}", e);
+            }
+        })
+        .await?;
     }
 
     // Animated thinking reaction: cycle emojis every 5s so user sees we're alive
@@ -269,13 +282,45 @@ async fn process_message(
         }
     });
 
+    // Semantic search for relevant past context
+    let semantic_context = {
+        let query = text.to_string();
+        let vs = Arc::clone(vecstore);
+        tokio::task::spawn_blocking(move || {
+            match vs.search(&query, Some(15)) {
+                Ok(results) => {
+                    // Filter out exact matches (current message) and low-relevance
+                    let relevant: Vec<_> = results
+                        .into_iter()
+                        .filter(|r| r.score > 0.3 && r.score < 0.99)
+                        .take(10)
+                        .collect();
+                    if relevant.is_empty() {
+                        String::new()
+                    } else {
+                        info!("Semantic search: {} relevant results (top score={:.3})", relevant.len(), relevant[0].score);
+                        crate::vecstore::format_search_context(&relevant, 3000)
+                    }
+                }
+                Err(e) => {
+                    warn!("Semantic search failed: {}", e);
+                    String::new()
+                }
+            }
+        })
+        .await
+        .unwrap_or_default()
+    };
+
     // Call Claude with streaming
     let paths = if file_paths.is_empty() {
         None
     } else {
         Some(file_paths)
     };
-    let mut stream = match inference::ask_claude_streaming(sender_id, text, config, paths).await {
+    let mut stream = match inference::ask_claude_streaming(
+        sender_id, text, config, paths, &semantic_context,
+    ).await {
         Ok(rx) => rx,
         Err(e) => {
             thinking_task.abort();
@@ -336,11 +381,12 @@ async fn process_message(
                         }
                         Some(edit_id) => {
                             // Check if we're exceeding Telegram limit — need to send new msg
-                            if trimmed.len() > 4000 {
+                            if telegram::char_len(&trimmed) > telegram::TG_STREAM_CHARS {
                                 // Finalize current message with text up to last newline
-                                let split_at = trimmed[..4000]
+                                let byte_limit = telegram::byte_offset_at_char(&trimmed, telegram::TG_STREAM_CHARS);
+                                let split_at = trimmed[..byte_limit]
                                     .rfind('\n')
-                                    .unwrap_or(4000);
+                                    .unwrap_or(byte_limit);
                                 let final_chunk = &trimmed[..split_at];
                                 let _ = telegram::edit_message(client, peer, edit_id, final_chunk)
                                     .await;
@@ -421,13 +467,14 @@ async fn process_message(
     match sent_msg_id {
         Some(edit_id) => {
             // Edit with final cleaned text (may differ from accumulated if memory tags removed)
-            if display_final.len() <= 4096 {
+            if telegram::char_len(display_final) <= telegram::TG_MAX_CHARS {
                 let _ = telegram::edit_message(client, peer, edit_id, display_final).await;
             } else {
                 // Need to split — edit current and send rest
-                let split_at = display_final[..4096]
+                let byte_limit = telegram::byte_offset_at_char(display_final, telegram::TG_MAX_CHARS);
+                let split_at = display_final[..byte_limit]
                     .rfind('\n')
-                    .unwrap_or(4096);
+                    .unwrap_or(byte_limit);
                 let _ =
                     telegram::edit_message(client, peer, edit_id, &display_final[..split_at]).await;
                 let rest = display_final[split_at..].trim_start_matches('\n');
@@ -444,11 +491,22 @@ async fn process_message(
         }
     }
 
-    // Log response (caller holds user lock, no inner lock needed)
+    // Log response and index it in vecstore
     {
         let cleaned = cleaned.clone();
-        tokio::task::spawn_blocking(move || memory::append_dialog(sender_id, "Sophia", &cleaned))
-            .await?;
+        let vs = Arc::clone(vecstore);
+        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        tokio::task::spawn_blocking(move || {
+            memory::append_dialog(sender_id, "Sophia", &cleaned);
+            if let Err(e) = vs.add(&cleaned, "Sophia", sender_id, &ts) {
+                warn!("Failed to index Sophia response: {}", e);
+            }
+            // Save index periodically (every message for now, cheap operation)
+            if let Err(e) = vs.save(&crate::config::data_dir().join("vecstore.usearch")) {
+                warn!("Failed to save vecstore index: {}", e);
+            }
+        })
+        .await?;
     }
 
     // Done reaction
@@ -740,7 +798,123 @@ async fn handle_help(client: &Client, peer: PeerRef, is_owner: bool) -> Result<(
         lines.push("`/memory add <text>` — Add to memory".to_string());
         lines.push("`/memory clear` — Clear memory".to_string());
         lines.push("`/update` — Install pending update and restart".to_string());
+        lines.push("`/search <query>` — Semantic search in dialogs".to_string());
+        lines.push("`/reindex` — Reindex all dialog files".to_string());
     }
     telegram::send_long(client, peer, &lines.join("\n")).await?;
+    Ok(())
+}
+
+async fn handle_search(
+    client: &Client,
+    peer: PeerRef,
+    query: &str,
+    vecstore: &Arc<VecStore>,
+) -> Result<()> {
+    if query.is_empty() {
+        telegram::send_long(client, peer, "Usage: /search <query>").await?;
+        return Ok(());
+    }
+
+    let query = query.to_string();
+    let vs = Arc::clone(vecstore);
+    let results = tokio::task::spawn_blocking(move || vs.search(&query, Some(5))).await??;
+
+    if results.is_empty() {
+        telegram::send_long(client, peer, "Ничего не найдено.").await?;
+        return Ok(());
+    }
+
+    let mut lines = vec![format!("**Результаты поиска** ({} шт, {} в индексе):", results.len(), vecstore.len())];
+    for (i, r) in results.iter().enumerate() {
+        let text_preview = if r.text.len() > 150 {
+            let mut end = 150;
+            while !r.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &r.text[..end])
+        } else {
+            r.text.clone()
+        };
+        lines.push(format!(
+            "{}. [{:.2}] **{}** [{}]: {}",
+            i + 1,
+            r.score,
+            r.role,
+            r.timestamp,
+            text_preview,
+        ));
+    }
+
+    telegram::send_long(client, peer, &lines.join("\n")).await?;
+    Ok(())
+}
+
+async fn handle_reindex(
+    client: &Client,
+    peer: PeerRef,
+    vecstore: &Arc<VecStore>,
+) -> Result<()> {
+    telegram::send_long(client, peer, "Начинаю переиндексацию диалогов...").await?;
+
+    let vs = Arc::clone(vecstore);
+    let result = tokio::task::spawn_blocking(move || -> Result<(usize, usize)> {
+        let dialogs_dir = crate::config::dialogs_dir();
+        if !dialogs_dir.exists() {
+            return Ok((0, 0));
+        }
+
+        let mut total_chunks = 0usize;
+        let mut total_files = 0usize;
+
+        // Iterate user directories
+        for user_entry in std::fs::read_dir(&dialogs_dir)? {
+            let user_entry = user_entry?;
+            if !user_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let user_id: i64 = match user_entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => continue,
+            };
+
+            // Iterate dialog files
+            for file_entry in std::fs::read_dir(user_entry.path())? {
+                let file_entry = file_entry?;
+                let path = file_entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+
+                match vs.index_dialog_file(&path, user_id) {
+                    Ok(count) => {
+                        total_chunks += count;
+                        total_files += 1;
+                        info!("Indexed {} chunks from {:?}", count, path);
+                    }
+                    Err(e) => {
+                        error!("Failed to index {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
+
+        // Save index
+        vs.save(&crate::config::data_dir().join("vecstore.usearch"))?;
+
+        Ok((total_files, total_chunks))
+    })
+    .await??;
+
+    telegram::send_long(
+        client,
+        peer,
+        &format!(
+            "Переиндексация завершена: {} файлов, {} чанков. Всего в индексе: {}",
+            result.0, result.1, vecstore.len()
+        ),
+    )
+    .await?;
+
     Ok(())
 }
