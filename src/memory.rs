@@ -81,9 +81,9 @@ pub fn build_system_prompt(recent_dialog: &str) -> String {
     let instructions_memory = read_file_safe(&config::instructions_memory_file());
     let mut memory = read_memory();
 
-    // Truncate memory if too long
-    if memory.len() > 1200 {
-        let mut start = memory.len() - 1200;
+    // Truncate memory if too long (8 KiB is fine with 1M context)
+    if memory.len() > 8192 {
+        let mut start = memory.len() - 8192;
         while !memory.is_char_boundary(start) {
             start += 1;
         }

@@ -26,6 +26,8 @@ pub struct Config {
     pub update_check_hours: u64,
     /// Automatically pull, rebuild and restart on new version.
     pub auto_update: bool,
+    /// Max output tokens for Claude CLI (0 = no limit).
+    pub max_tokens: u32,
 }
 
 impl Config {
@@ -82,6 +84,10 @@ impl Config {
             .unwrap_or_else(|_| "false".into())
             .to_lowercase()
             == "true";
+        let max_tokens: u32 = std::env::var("MAX_TOKENS")
+            .unwrap_or_else(|_| "16384".into())
+            .parse()
+            .unwrap_or(16384);
 
         Ok(Self {
             api_id,
@@ -95,6 +101,7 @@ impl Config {
             exec_allowed_commands,
             update_check_hours,
             auto_update,
+            max_tokens,
         })
     }
 }
