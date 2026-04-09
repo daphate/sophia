@@ -23,8 +23,8 @@ fn uptime_str() -> String {
     }
 }
 
-/// Handle an incoming command. Returns response text or None to silently drop.
-pub async fn handle(text: &str) -> Option<String> {
+/// Handle an incoming message. Always returns a response.
+pub async fn handle(text: &str) -> String {
     let text = text.trim();
     let (cmd, args) = match text.split_once(' ') {
         Some((c, a)) => (c, a.trim()),
@@ -32,29 +32,40 @@ pub async fn handle(text: &str) -> Option<String> {
     };
 
     match cmd {
-        "/ping" => Some(format!("🏓 pong (uptime: {})", uptime_str())),
-        "/status" => Some(cmd_status().await),
-        "/restart" => Some(cmd_restart().await),
-        "/logs" => Some(cmd_logs(args).await),
+        "/ping" => format!("🏓 pong (uptime: {})", uptime_str()),
+        "/status" => cmd_status().await,
+        "/restart" => cmd_restart().await,
+        "/logs" => cmd_logs(args).await,
         "/exec" => {
             if args.is_empty() {
-                Some("Usage: /exec <command>".into())
+                "Usage: /exec <cmd>".into()
             } else {
-                Some(cmd_exec(args).await)
+                cmd_exec(args).await
             }
         }
-        "/help" | "/start" => Some(
-            "🛟 sophia-rescue commands:\n\
-             /ping — alive check\n\
-             /status — main sophia process status\n\
-             /restart — restart main sophia via launchctl\n\
-             /logs [N] — last N lines of sophia logs (default 50)\n\
-             /exec <cmd> — run shell command\n\
-             /help — this message"
-                .into(),
-        ),
-        _ => None,
+        "/help" | "/start" => help_text(),
+        _ => {
+            if text.starts_with('/') {
+                format!("❓ Неизвестная команда: {cmd}\n\n{}", help_text())
+            } else {
+                format!(
+                    "🛟 Я — rescue-бот. Слежу за основной Софией и могу её перезапустить.\n\n{}",
+                    help_text()
+                )
+            }
+        }
     }
+}
+
+fn help_text() -> String {
+    "🛟 sophia-rescue commands:\n\
+     /ping — alive check\n\
+     /status — main sophia process status\n\
+     /restart — restart main sophia via launchctl\n\
+     /logs [N] — last N lines of sophia logs (default 50)\n\
+     /exec <cmd> — run shell command\n\
+     /help — this message"
+        .into()
 }
 
 async fn cmd_status() -> String {

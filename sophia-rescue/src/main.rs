@@ -122,11 +122,10 @@ async fn main() -> Result<()> {
                     }
 
                     let text = message.text();
-                    if !text.is_empty() && text.starts_with('/') {
-                        if let Some(response) = commands::handle(text).await {
-                            if let Some(peer) = message.peer_ref().await {
-                                send_long(&client, peer, &response).await;
-                            }
+                    if !text.is_empty() {
+                        let response = commands::handle(text).await;
+                        if let Some(peer) = message.peer_ref().await {
+                            send_long(&client, peer, &response).await;
                         }
                     }
                 }
