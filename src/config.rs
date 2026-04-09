@@ -18,6 +18,7 @@ pub struct Config {
     pub mode: BotMode,
     pub owner_id: i64,
     pub claude_cli: String,
+    #[allow(dead_code)]
     pub inference_timeout: u64,
     pub session_name: String,
     pub exec_enabled: bool,
