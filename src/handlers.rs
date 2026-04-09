@@ -190,18 +190,32 @@ async fn process_message(
     // Thinking reaction
     telegram::react(client, peer, msg_id, "🤔").await;
 
-    // Send typing indicator
+    // Send typing indicator, keep refreshing it while inference runs
     telegram::send_typing(client, peer).await;
 
-    // Call Claude
+    // Background task: refresh typing every 8s (Telegram typing expires after ~10s)
+    let typing_client = client.clone();
+    let typing_peer = peer;
+    let typing_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            telegram::send_typing(&typing_client, typing_peer).await;
+        }
+    });
+
+    // Call Claude (no hard timeout — polls process status indefinitely)
     let paths = if file_paths.is_empty() {
         None
     } else {
         Some(file_paths)
     };
     let (response, cost) = match inference::ask_claude(sender_id, text, config, paths).await {
-        Ok(result) => result,
+        Ok(result) => {
+            typing_task.abort();
+            result
+        }
         Err(e) => {
+            typing_task.abort();
             telegram::react(client, peer, msg_id, "🥶").await;
             error!("Inference failed for msg {}: {}", msg_id, e);
             telegram::send_long(client, peer, "Произошла ошибка при обработке запроса.").await?;

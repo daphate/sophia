@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::config::Config;
 use crate::memory::{build_system_prompt, load_recent_dialog};
@@ -18,9 +18,7 @@ pub struct CostInfo {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InferenceError {
-    #[error("Claude CLI timed out after {0}s")]
-    Timeout(u64),
-    #[error("Claude CLI not found at: {0}")]
+#[error("Claude CLI not found at: {0}")]
     CliNotFound(String),
     #[error("Claude CLI error (rc={code}): {stderr}")]
     CliError { code: i32, stderr: String },
@@ -92,17 +90,59 @@ pub async fn ask_claude(
         })?;
     }
 
-    // Wait with timeout
-    let output = tokio::time::timeout(
-        Duration::from_secs(config.inference_timeout),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| {
-        // Kill the process on timeout
-        InferenceError::Timeout(config.inference_timeout)
-    })?
-    .map_err(|e| InferenceError::Other(e.into()))?;
+    // Poll process status every 30s instead of hard timeout.
+    // We read stdout/stderr ourselves so we can poll with try_wait().
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut r) = stdout_handle {
+            tokio::io::AsyncReadExt::read_to_end(&mut r, &mut buf).await.ok();
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut r) = stderr_handle {
+            tokio::io::AsyncReadExt::read_to_end(&mut r, &mut buf).await.ok();
+        }
+        buf
+    });
+
+    // Poll every 2s for quick responses, log every 30s for long ones.
+    let poll_interval = Duration::from_secs(2);
+    let mut elapsed_secs: u64 = 0;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                tokio::time::sleep(poll_interval).await;
+                elapsed_secs += 2;
+                if elapsed_secs % 30 == 0 {
+                    debug!(
+                        "Claude CLI still running after {}s, waiting...",
+                        elapsed_secs
+                    );
+                }
+            }
+            Err(e) => {
+                return Err(InferenceError::Other(anyhow::anyhow!(
+                    "Failed to poll Claude CLI: {}",
+                    e
+                )));
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_task.await.map_err(|e| InferenceError::Other(e.into()))?;
+    let stderr_bytes = stderr_task.await.map_err(|e| InferenceError::Other(e.into()))?;
+
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from(status),
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
