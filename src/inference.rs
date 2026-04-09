@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::config::Config;
@@ -14,6 +15,20 @@ pub struct CostInfo {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: Option<f64>,
+}
+
+/// Events emitted during streaming inference.
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// A chunk of text from the model.
+    TextDelta(String),
+    /// Inference completed with full text and optional cost.
+    Done {
+        full_text: String,
+        cost: Option<CostInfo>,
+    },
+    /// An error occurred.
+    Error(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +43,7 @@ pub enum InferenceError {
     Other(#[from] anyhow::Error),
 }
 
+#[allow(dead_code)]
 pub async fn ask_claude(
     user_id: i64,
     message: &str,
@@ -176,6 +192,7 @@ pub async fn ask_claude(
     }
 }
 
+#[allow(dead_code)]
 fn parse_claude_output(raw: &str) -> Result<(String, Option<CostInfo>)> {
     let data: Value = serde_json::from_str(raw)?;
 
@@ -256,4 +273,187 @@ fn parse_claude_output(raw: &str) -> Result<(String, Option<CostInfo>)> {
     });
 
     Ok((final_text, cost))
+}
+
+/// Streaming version of ask_claude. Sends text deltas through a channel
+/// as they arrive from the Claude CLI, then sends a Done event with the
+/// full text and cost info.
+pub async fn ask_claude_streaming(
+    user_id: i64,
+    message: &str,
+    config: &Config,
+    file_paths: Option<&[PathBuf]>,
+) -> Result<mpsc::Receiver<StreamEvent>, InferenceError> {
+    let recent = tokio::task::spawn_blocking({
+        let user_id = user_id;
+        move || load_recent_dialog(user_id, 15, 3000)
+    })
+    .await
+    .map_err(|e| InferenceError::Other(e.into()))?;
+
+    let system_prompt = tokio::task::spawn_blocking({
+        let recent = recent.clone();
+        move || build_system_prompt(&recent)
+    })
+    .await
+    .map_err(|e| InferenceError::Other(e.into()))?;
+
+    // Build prompt with file references
+    let mut prompt_parts = Vec::new();
+    if let Some(paths) = file_paths {
+        for fp in paths {
+            prompt_parts.push(format!("[Attached file: {}]", fp.display()));
+        }
+        if !prompt_parts.is_empty() {
+            prompt_parts.push(String::new());
+        }
+    }
+    prompt_parts.push(message.to_string());
+    let full_message = prompt_parts.join("\n");
+
+    let mut cmd = tokio::process::Command::new(&config.claude_cli);
+    cmd.args([
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--dangerously-skip-permissions",
+        "--system-prompt",
+        &system_prompt,
+    ]);
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            InferenceError::CliNotFound(config.claude_cli.clone())
+        } else {
+            InferenceError::Other(e.into())
+        }
+    })?;
+
+    // Write to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(full_message.as_bytes()).await.map_err(|e| {
+            InferenceError::Other(anyhow::anyhow!("Failed to write to stdin: {}", e))
+        })?;
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| InferenceError::Other(anyhow::anyhow!("No stdout from Claude CLI")))?;
+
+    let (tx, rx) = mpsc::channel::<StreamEvent>(64);
+
+    // Spawn background task that reads stream-json lines and sends events
+    tokio::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut full_text = String::new();
+        let mut cost_info: Option<CostInfo> = None;
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parsed: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let event_type = parsed
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            match event_type {
+                "stream_event" => {
+                    if let Some(event) = parsed.get("event") {
+                        let inner_type =
+                            event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if inner_type == "content_block_delta" {
+                            if let Some(delta) = event.get("delta") {
+                                if delta.get("type").and_then(|v| v.as_str())
+                                    == Some("text_delta")
+                                {
+                                    if let Some(text) =
+                                        delta.get("text").and_then(|v| v.as_str())
+                                    {
+                                        full_text.push_str(text);
+                                        if tx.send(StreamEvent::TextDelta(text.to_string()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break; // receiver dropped
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "result" => {
+                    // Extract final text from result if available
+                    if let Some(r) = parsed.get("result").and_then(|v| v.as_str()) {
+                        full_text = r.to_string();
+                    }
+                    let total_input = parsed
+                        .get("usage")
+                        .and_then(|u| u.get("input_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| {
+                            parsed
+                                .get("total_input_tokens")
+                                .and_then(|v| v.as_u64())
+                        })
+                        .unwrap_or(0);
+                    let total_output = parsed
+                        .get("usage")
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| {
+                            parsed
+                                .get("total_output_tokens")
+                                .and_then(|v| v.as_u64())
+                        })
+                        .unwrap_or(0);
+                    let cost_usd = parsed
+                        .get("total_cost_usd")
+                        .and_then(|v| v.as_f64());
+                    cost_info = Some(CostInfo {
+                        input_tokens: total_input,
+                        output_tokens: total_output,
+                        cost_usd,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Wait for process to finish
+        let status = child.wait().await;
+        if let Ok(st) = &status {
+            if !st.success() {
+                let _ = tx
+                    .send(StreamEvent::Error(format!(
+                        "Claude CLI exited with code {}",
+                        st.code().unwrap_or(-1)
+                    )))
+                    .await;
+                return;
+            }
+        }
+
+        let _ = tx
+            .send(StreamEvent::Done {
+                full_text,
+                cost: cost_info,
+            })
+            .await;
+    });
+
+    Ok(rx)
 }

@@ -34,6 +34,31 @@ pub async fn react(client: &Client, peer: PeerRef, msg_id: i32, emoji: &str) {
     }
 }
 
+/// Edit an existing message.
+pub async fn edit_message(client: &Client, peer: PeerRef, msg_id: i32, text: &str) -> Result<()> {
+    let truncated = if text.len() > TG_MAX_LEN {
+        let mut end = TG_MAX_LEN;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        text
+    };
+    client
+        .edit_message(peer, msg_id, InputMessage::new().text(truncated))
+        .await?;
+    Ok(())
+}
+
+/// Send a message and return its ID.
+pub async fn send_and_get_id(client: &Client, peer: PeerRef, text: &str) -> Result<i32> {
+    let msg = client
+        .send_message(peer, InputMessage::new().text(text))
+        .await?;
+    Ok(msg.id())
+}
+
 /// Send message, splitting at 4096 char Telegram limit.
 pub async fn send_long(client: &Client, peer: PeerRef, text: &str) -> Result<()> {
     let mut remaining = text;

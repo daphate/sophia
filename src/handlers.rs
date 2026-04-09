@@ -256,17 +256,14 @@ async fn process_message(
         }
     });
 
-    // Call Claude (no hard timeout — polls process status indefinitely)
+    // Call Claude with streaming
     let paths = if file_paths.is_empty() {
         None
     } else {
         Some(file_paths)
     };
-    let (response, cost) = match inference::ask_claude(sender_id, text, config, paths).await {
-        Ok(result) => {
-            typing_task.abort();
-            result
-        }
+    let mut stream = match inference::ask_claude_streaming(sender_id, text, config, paths).await {
+        Ok(rx) => rx,
         Err(e) => {
             typing_task.abort();
             telegram::react(client, peer, msg_id, "🥶").await;
@@ -276,8 +273,108 @@ async fn process_message(
         }
     };
 
-    // Composing reaction
-    telegram::react(client, peer, msg_id, "🧑‍💻").await;
+    // Stream response to Telegram: send first chunk, then edit message as text grows
+    let mut accumulated = String::new();
+    let mut sent_msg_id: Option<i32> = None;
+    let mut last_edit = tokio::time::Instant::now();
+    let mut response = String::new();
+    let mut cost_info: Option<inference::CostInfo> = None;
+    let edit_interval = std::time::Duration::from_millis(800);
+    // Track how much text we've already sent in previous (completed) messages
+    let mut sent_in_previous_msgs = 0usize;
+
+    while let Some(event) = stream.recv().await {
+        match event {
+            inference::StreamEvent::TextDelta(delta) => {
+                accumulated.push_str(&delta);
+
+                // Skip leading whitespace for first send
+                if sent_msg_id.is_none() && accumulated.trim().is_empty() {
+                    continue;
+                }
+
+                let display_text = if sent_in_previous_msgs > 0 {
+                    &accumulated[sent_in_previous_msgs..]
+                } else {
+                    &accumulated
+                };
+
+                let now = tokio::time::Instant::now();
+                let should_update = now.duration_since(last_edit) >= edit_interval
+                    && !display_text.trim().is_empty();
+
+                if should_update {
+                    typing_task.abort(); // stop typing once we start showing text
+                    let trimmed = display_text.trim_start().to_string();
+                    match sent_msg_id {
+                        None => {
+                            // First chunk — send new message
+                            match telegram::send_and_get_id(client, peer, &trimmed).await {
+                                Ok(id) => {
+                                    sent_msg_id = Some(id);
+                                    telegram::react(client, peer, msg_id, "🧑‍💻").await;
+                                }
+                                Err(e) => {
+                                    error!("Failed to send streaming message: {}", e);
+                                }
+                            }
+                        }
+                        Some(edit_id) => {
+                            // Check if we're exceeding Telegram limit — need to send new msg
+                            if trimmed.len() > 4000 {
+                                // Finalize current message with text up to last newline
+                                let split_at = trimmed[..4000]
+                                    .rfind('\n')
+                                    .unwrap_or(4000);
+                                let final_chunk = &trimmed[..split_at];
+                                let _ = telegram::edit_message(client, peer, edit_id, final_chunk)
+                                    .await;
+                                // Mark everything up to split_at as sent
+                                sent_in_previous_msgs += split_at;
+                                let remainder = accumulated[sent_in_previous_msgs..]
+                                    .trim_start_matches('\n')
+                                    .to_string();
+                                sent_in_previous_msgs = accumulated.len() - remainder.len();
+                                // Send new message with remainder
+                                if !remainder.trim().is_empty() {
+                                    match telegram::send_and_get_id(client, peer, &remainder).await
+                                    {
+                                        Ok(id) => sent_msg_id = Some(id),
+                                        Err(e) => error!("Failed to send overflow msg: {}", e),
+                                    }
+                                } else {
+                                    sent_msg_id = None;
+                                }
+                            } else {
+                                let _ =
+                                    telegram::edit_message(client, peer, edit_id, &trimmed).await;
+                            }
+                        }
+                    }
+                    last_edit = now;
+                }
+            }
+            inference::StreamEvent::Done {
+                full_text,
+                cost,
+            } => {
+                response = full_text;
+                cost_info = cost;
+            }
+            inference::StreamEvent::Error(e) => {
+                typing_task.abort();
+                telegram::react(client, peer, msg_id, "🥶").await;
+                error!("Streaming error for msg {}: {}", msg_id, e);
+                if sent_msg_id.is_none() {
+                    telegram::send_long(client, peer, "Произошла ошибка при обработке запроса.")
+                        .await?;
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    typing_task.abort();
 
     // Extract and save memory updates
     let (cleaned, updates) = memory::extract_memory_updates(&response);
@@ -290,11 +387,44 @@ async fn process_message(
         .await?;
     }
 
-    if let Some(cost) = &cost {
+    if let Some(cost) = &cost_info {
         info!(
             "Inference cost for {}: in={} out={} usd={:?}",
             sender_id, cost.input_tokens, cost.output_tokens, cost.cost_usd
         );
+    }
+
+    // Final edit/send with the cleaned (memory-stripped) text
+    let display_final = if sent_in_previous_msgs > 0 {
+        cleaned[sent_in_previous_msgs.min(cleaned.len())..].trim_start_matches('\n')
+    } else {
+        cleaned.trim_start()
+    };
+
+    match sent_msg_id {
+        Some(edit_id) => {
+            // Edit with final cleaned text (may differ from accumulated if memory tags removed)
+            if display_final.len() <= 4096 {
+                let _ = telegram::edit_message(client, peer, edit_id, display_final).await;
+            } else {
+                // Need to split — edit current and send rest
+                let split_at = display_final[..4096]
+                    .rfind('\n')
+                    .unwrap_or(4096);
+                let _ =
+                    telegram::edit_message(client, peer, edit_id, &display_final[..split_at]).await;
+                let rest = display_final[split_at..].trim_start_matches('\n');
+                if !rest.is_empty() {
+                    telegram::send_long(client, peer, rest).await?;
+                }
+            }
+        }
+        None => {
+            // Never sent anything (very short response?) — send now
+            if !cleaned.trim().is_empty() {
+                telegram::send_long(client, peer, cleaned.trim()).await?;
+            }
+        }
     }
 
     // Log response (caller holds user lock, no inner lock needed)
@@ -303,9 +433,6 @@ async fn process_message(
         tokio::task::spawn_blocking(move || memory::append_dialog(sender_id, "Sophia", &cleaned))
             .await?;
     }
-
-    // Send response
-    telegram::send_long(client, peer, &cleaned).await?;
 
     // Done reaction
     telegram::react(client, peer, msg_id, "👌").await;
