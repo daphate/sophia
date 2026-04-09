@@ -541,24 +541,6 @@ async fn process_message(
         .await?;
     }
 
-    // Send voice message with TTS of the response
-    if !cleaned.trim().is_empty() {
-        // Limit TTS text to avoid very long audio (cap at ~2000 chars)
-        let tts_text = if cleaned.len() > 2000 {
-            let mut end = 2000;
-            while !cleaned.is_char_boundary(end) {
-                end -= 1;
-            }
-            &cleaned[..end]
-        } else {
-            &cleaned
-        };
-        match telegram::send_voice(client, peer, tts_text).await {
-            Ok(_) => info!("Voice message sent for user {}", sender_id),
-            Err(e) => error!("Failed to send voice message: {}", e),
-        }
-    }
-
     // Done reaction
     telegram::react(client, peer, msg_id, "👌").await;
 
