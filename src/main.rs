@@ -268,9 +268,15 @@ async fn main() -> Result<()> {
         .stream_updates(pool.updates, UpdatesConfiguration { catch_up: true, ..Default::default() })
         .await;
     let mut shutdown_rx = shutdown_tx.subscribe();
+    let mut sync_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    sync_interval.tick().await; // skip the immediate first tick
 
     loop {
         tokio::select! {
+            _ = sync_interval.tick() => {
+                update_stream.sync_update_state().await;
+                debug!("Synced update state");
+            }
             update = update_stream.next() => {
                 match update {
                     Ok(update) => {

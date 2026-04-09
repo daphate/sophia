@@ -52,7 +52,9 @@ impl MessageQueue {
                 file_paths  TEXT    NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_messages_status
-            ON messages (status, created_at);",
+            ON messages (status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_msg
+            ON messages (chat_id, msg_id);",
         )?;
 
         // Migration: add file_paths if missing
@@ -98,11 +100,28 @@ impl MessageQueue {
         let t = now();
         let cutoff = t - 60.0;
 
-        // Dedup
+        // Dedup by msg_id: skip if this Telegram message exists in ANY status
+        // (pending, processing, or done) — prevents re-processing after restart + catch_up
+        let already_handled: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND msg_id = ?2",
+                rusqlite::params![chat_id, msg_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if already_handled {
+            info!("Skipping duplicate msg_id={} (already handled)", msg_id);
+            return Ok((0, true));
+        }
+
+        // Dedup by text content (for batching window)
+        // Check both 'pending' AND 'processing' — prevents re-enqueue while Claude is still thinking
         let existing: Option<i64> = conn
             .query_row(
                 "SELECT id FROM messages WHERE sender_id = ?1 AND chat_id = ?2 AND text = ?3 \
-                 AND status = 'pending' AND created_at > ?4 ORDER BY created_at DESC LIMIT 1",
+                 AND status IN ('pending', 'processing') AND created_at > ?4 ORDER BY created_at DESC LIMIT 1",
                 rusqlite::params![sender_id, chat_id, text, cutoff],
                 |row| row.get(0),
             )

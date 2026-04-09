@@ -97,6 +97,18 @@ async fn handle_private_message(
     shutdown_tx: &broadcast::Sender<()>,
     vecstore: &Arc<VecStore>,
 ) -> Result<()> {
+    // Skip old messages from catch_up replay (older than 5 minutes)
+    let msg_age = chrono::Utc::now().signed_duration_since(message.date());
+    if msg_age.num_seconds() > 300 {
+        info!(
+            "Skipping stale message from {} (age={}s, msg_id={})",
+            sender_id,
+            msg_age.num_seconds(),
+            message.id()
+        );
+        return Ok(());
+    }
+
     let text = message.text().trim().to_string();
     let has_media = message.media().is_some();
 
@@ -167,7 +179,11 @@ async fn handle_private_message(
         .collect::<Vec<_>>()
         .join("\n");
     let chat_id = peer.id.bare_id();
-    queue.enqueue(sender_id, chat_id, msg_id, &text, &file_paths_str)?;
+    let (_id, is_dup) = queue.enqueue(sender_id, chat_id, msg_id, &text, &file_paths_str)?;
+    if is_dup {
+        info!("Duplicate message msg_id={} from {}, skipping", msg_id, sender_id);
+        return Ok(());
+    }
     info!("Message from {} enqueued (msg_id={}), debounce 2s", sender_id, msg_id);
 
     // Debounce: wait 2s for more messages from the same user
