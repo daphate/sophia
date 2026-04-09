@@ -155,14 +155,73 @@ async fn handle_private_message(
         return Ok(());
     }
 
-    // --- React and process ---
-    telegram::react(client, peer, msg_id, "🫡").await;
-    info!("Message from {}, processing", sender_id);
+    // --- Enqueue for debounce batching ---
+    let file_paths_str = file_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let chat_id = peer.id.bare_id();
+    queue.enqueue(sender_id, chat_id, msg_id, &text, &file_paths_str)?;
+    info!("Message from {} enqueued (msg_id={}), debounce 2s", sender_id, msg_id);
 
-    process_message(
-        client, config, peer, msg_id, sender_id, &text, &file_paths, queue, user_locks,
+    // Debounce: wait 2s for more messages from the same user
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Acquire per-user lock — serializes batch processing per user
+    let lock = get_lock(user_locks, sender_id);
+    let _guard = lock.lock().await;
+
+    // Take all pending messages for this user+chat
+    let msgs = queue.take_batch(sender_id, chat_id)?;
+    if msgs.is_empty() {
+        // Another handler already processed our messages
+        return Ok(());
+    }
+
+    // Combine texts and file paths from the batch
+    let combined_text = msgs
+        .iter()
+        .map(|m| m.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let all_file_paths: Vec<PathBuf> = msgs
+        .iter()
+        .flat_map(|m| {
+            m.file_paths
+                .split('\n')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .collect();
+    let last_msg_id = msgs.last().unwrap().msg_id;
+    let queue_ids: Vec<i64> = msgs.iter().map(|m| m.id).collect();
+
+    info!(
+        "Processing batch of {} message(s) from {} (react on msg_id={})",
+        msgs.len(),
+        sender_id,
+        last_msg_id
+    );
+
+    // React only on the LAST message
+    telegram::react(client, peer, last_msg_id, "🫡").await;
+
+    let result = process_message(
+        client, config, peer, last_msg_id, sender_id, &combined_text, &all_file_paths,
     )
-    .await
+    .await;
+
+    // Mark queue entries done/failed
+    for id in queue_ids {
+        if result.is_ok() {
+            let _ = queue.mark_done(id);
+        } else {
+            let _ = queue.mark_failed(id);
+        }
+    }
+
+    result
 }
 
 async fn process_message(
@@ -173,18 +232,12 @@ async fn process_message(
     sender_id: i64,
     text: &str,
     file_paths: &[PathBuf],
-    _queue: &MessageQueue,
-    user_locks: &UserLocks,
 ) -> Result<()> {
-    // Log user message
+    // Log user message (caller holds user lock, no inner lock needed)
     {
-        let lock = get_lock(user_locks, sender_id);
-        let _guard = lock.lock().await;
-        tokio::task::spawn_blocking({
-            let text = text.to_string();
-            move || memory::append_dialog(sender_id, "User", &text)
-        })
-        .await?;
+        let text = text.to_string();
+        tokio::task::spawn_blocking(move || memory::append_dialog(sender_id, "User", &text))
+            .await?;
     }
 
     // Thinking reaction
@@ -244,15 +297,11 @@ async fn process_message(
         );
     }
 
-    // Log response
+    // Log response (caller holds user lock, no inner lock needed)
     {
-        let lock = get_lock(user_locks, sender_id);
-        let _guard = lock.lock().await;
-        tokio::task::spawn_blocking({
-            let cleaned = cleaned.clone();
-            move || memory::append_dialog(sender_id, "Sophia", &cleaned)
-        })
-        .await?;
+        let cleaned = cleaned.clone();
+        tokio::task::spawn_blocking(move || memory::append_dialog(sender_id, "Sophia", &cleaned))
+            .await?;
     }
 
     // Send response
