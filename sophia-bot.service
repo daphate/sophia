@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
+# Edit these to match your setup:
 User=ubuntu
-WorkingDirectory=/home/ubuntu/.sophia
-Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 start.py
+WorkingDirectory=/home/ubuntu/sophia
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/sophia/target/release/sophia
 Restart=on-failure
 RestartSec=5
 

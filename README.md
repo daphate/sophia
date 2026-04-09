@@ -1,187 +1,182 @@
-# Sophia v1.0-beta (2026-04-08)
+# Sophia Bot v1.0-beta
 
-Telegram userbot with Claude CLI backend + Anthropic-compatible HTTP proxy.
+> Release date: 2026-04-09
 
-> **Disclaimer:** This project is provided strictly for educational and research purposes only. It demonstrates how, in theory, one could build an Anthropic-compatible proxy over Claude CLI. The authors do not encourage using this in production or in any way that may violate Anthropic's Terms of Service. Use at your own risk and responsibility.
+Telegram bot powered by Claude CLI. Works as a regular bot or userbot. Written in Rust.
 
-## Why
-
-Use [OpenClaw](https://openclaw.dev) (or any Anthropic-compatible client) with your own Claude Pro/Max subscription — no API keys needed. Sophia Proxy wraps Claude CLI into a standard `/v1/messages` endpoint (Anthropic Messages API), so you can run a self-hosted AI stack on a small VPS or locally on your Mac/PC, powered by the same Claude you already pay for.
-
-## Components
-
-This repo contains two independent components. Install either or both:
-
-| Component | Directory | What it does |
-|---|---|---|
-| **Sophia Proxy** | `proxy/` | Anthropic-compatible HTTP proxy over Claude CLI |
-| **Sophia Bot** | `bot/` | Telegram userbot with memory, pairing, command execution |
-
----
-
-# Sophia Proxy
-
-Translates Anthropic Messages API calls (`/v1/messages`) into Claude CLI subprocess invocations. Supports streaming (SSE with incremental deltas) and non-streaming modes. Passes images inline as base64. Stateless — no sessions, no files on disk.
-
-## Prerequisites
-
-- [Rust](https://rustup.rs/) (stable)
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) — installed and authenticated (`claude login`)
+Features: persistent memory, user pairing, OS command execution, per-user dialog history, automatic update notifications.
 
 ## Quick install
 
-**Linux** (builds + systemd service):
+**Linux / macOS:**
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/daphate/sophia-proxy/main/proxy/install-linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/daphate/sophia/main/install.sh | bash
 ```
 
-**macOS** (builds + LaunchAgent):
-```bash
-curl -sSL https://raw.githubusercontent.com/daphate/sophia-proxy/main/proxy/install-mac.sh | bash
-```
+**Windows (PowerShell):**
 
-**Windows** (PowerShell, builds + optional service):
 ```powershell
-irm https://raw.githubusercontent.com/daphate/sophia-proxy/main/proxy/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/daphate/sophia/main/install.ps1 | iex
 ```
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable, 1.75+)
+- Telegram API credentials (`api_id`, `api_hash` from https://my.telegram.org)
+- [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude login`)
 
 ## Manual install
 
+### 1. Clone and build
+
 ```bash
-git clone https://github.com/daphate/sophia-proxy.git
-cd sophia-proxy/proxy
+git clone https://github.com/daphate/sophia.git
+cd sophia
 cargo build --release
-cp .env.example .env   # edit as needed
-./target/release/sophia-proxy
 ```
 
-Test:
-```bash
-curl http://127.0.0.1:8080/v1/models
-curl http://127.0.0.1:8080/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: sk-sophia-local" \
-  -d '{"model":"claude-opus-4-6","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `PROXY_HOST` | `127.0.0.1` | Bind address |
-| `PROXY_PORT` | `8080` | Bind port |
-| `CLAUDE_CLI` | `claude` | Path to Claude CLI binary |
-| `MODEL_NAME` | `claude-opus-4-6` | Model name reported to clients |
-| `INFERENCE_TIMEOUT` | _(none)_ | Request timeout in seconds |
-| `MAX_TURNS` | _(none)_ | Max conversation turns per request |
-| `RUST_LOG` | `info` | Log level (`debug`, `info`, `error`) |
-
-## Service management
-
-**Linux (systemd):**
-```bash
-sudo systemctl start sophia-proxy
-sudo systemctl stop sophia-proxy
-sudo systemctl restart sophia-proxy
-journalctl -u sophia-proxy -f
-```
-
-**macOS (LaunchAgent):**
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.sophia.proxy.plist    # stop
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sophia.proxy.plist  # start
-tail -f /tmp/sophia-proxy.log
-```
-
-**Windows (Admin):**
-```powershell
-sc.exe stop SophiaProxy
-sc.exe start SophiaProxy
-sc.exe delete SophiaProxy
-```
-
-## OpenClaw Integration
-
-Configure [OpenClaw](https://openclaw.dev) to route all LLM requests through sophia-proxy using the `secondf8n/sophia` model.
-
-**Linux / macOS:**
-```bash
-cd sophia-proxy/proxy && ./setup-openclaw.sh
-```
-
-**Windows:**
-```powershell
-cd sophia-proxy\proxy; powershell -ExecutionPolicy Bypass -File setup-openclaw.ps1
-```
-
-The script backs up your config, adds `sophia-proxy` as a provider, and sets it as the primary model. To configure manually, add to `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "models": {
-    "providers": {
-      "sophia-proxy": {
-        "baseUrl": "http://127.0.0.1:8080/v1",
-        "apiKey": "sk-sophia-local",
-        "api": "anthropic-messages",
-        "models": [
-          {
-            "id": "secondf8n/sophia",
-            "name": "Sophia (Claude via CLI proxy)",
-            "contextWindow": 1000000,
-            "maxTokens": 64000
-          }
-        ]
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "sophia-proxy/secondf8n/sophia"
-      }
-    }
-  }
-}
-```
-
-For remote servers, set `SOPHIA_PROXY_HOST` and `SOPHIA_PROXY_PORT` before running the setup script.
-
----
-
-# Sophia Bot (Telegram)
-
-Telegram userbot powered by Claude CLI. Features: message queue with batching, persistent memory, user pairing, OS command execution.
-
-## Prerequisites
-
-- Python 3.11+
-- Telegram API credentials (`api_id`, `api_hash` from https://my.telegram.org)
-- Claude CLI installed and authenticated
-
-## Install
+### 2. Configure
 
 ```bash
-git clone https://github.com/daphate/sophia-proxy.git
-cd sophia-proxy
-pip install -r requirements.txt
+cp .env.example .env
+```
 
-cat > .env <<'EOF'
+Edit `.env` with your values:
+
+```env
 API_ID=your_api_id
 API_HASH=your_api_hash
-PHONE_NUMBER=+1234567890
+# Use BOT_TOKEN for regular bot mode, or PHONE_NUMBER for userbot mode
+BOT_TOKEN=123456:ABC-DEF
+# PHONE_NUMBER=+1234567890
 OWNER_ID=your_telegram_id
 CLAUDE_CLI=claude
-EOF
-
-python3 start.py
+INFERENCE_TIMEOUT=120
+SESSION_NAME=sophia
+EXEC_ENABLED=true
+EXEC_ALLOWED_COMMANDS=cat,echo,ls,pwd,date,whoami,uname,head,tail,wc,df,free,uptime,tee
+UPDATE_CHECK_HOURS=12
 ```
 
-**Systemd service (Linux):**
+| Variable | Description |
+|---|---|
+| `API_ID` | Telegram API ID from https://my.telegram.org |
+| `API_HASH` | Telegram API hash |
+| `BOT_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) (bot mode) |
+| `PHONE_NUMBER` | Phone number (userbot mode). Either `BOT_TOKEN` or `PHONE_NUMBER` is required |
+| `OWNER_ID` | Your Telegram user ID (numeric). The bot treats this user as admin |
+| `CLAUDE_CLI` | Path to Claude CLI binary (default: `claude`) |
+| `INFERENCE_TIMEOUT` | Max seconds to wait for Claude response (default: `120`) |
+| `SESSION_NAME` | Telegram session file name (default: `sophia`) |
+| `EXEC_ENABLED` | Enable `/exec` command (default: `true`) |
+| `EXEC_ALLOWED_COMMANDS` | Comma-separated whitelist of allowed OS commands |
+| `UPDATE_CHECK_HOURS` | How often to check for updates, in hours. `0` = disabled (default: `12`) |
+
+### 3. First run
+
+```bash
+./target/release/sophia
+```
+
+On first run you will be prompted for:
+1. Telegram login code (sent to your Telegram app)
+2. 2FA password (if enabled)
+
+After authentication the session is saved and subsequent runs won't ask again.
+
+### 4. Update
+
+Sophia checks for updates automatically (every 12 hours by default). To update manually:
+
+```bash
+cd sophia
+git pull
+cargo build --release
+```
+
+Then restart the bot.
+
+### 5. Debug mode
+
+```bash
+./target/release/sophia --debug
+```
+
+Logs all raw Telegram updates for troubleshooting.
+
+## Platform-specific setup
+
+### Linux (systemd)
+
 ```bash
 sudo cp sophia-bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sophia-bot
+```
+
+Edit `sophia-bot.service` to match your paths:
+
+```ini
+[Service]
+WorkingDirectory=/path/to/sophia
+ExecStart=/path/to/sophia/target/release/sophia
+User=your_user
+```
+
+### macOS (launchd)
+
+Create `~/Library/LaunchAgents/com.sophia.bot.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sophia.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/sophia/target/release/sophia</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/sophia</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/sophia.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/sophia.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.sophia.bot.plist
+```
+
+### Windows
+
+Run in PowerShell:
+
+```powershell
+git clone https://github.com/daphate/sophia.git
+cd sophia
+cargo build --release
+copy .env.example .env
+# Edit .env with your values
+.\target\release\sophia.exe
+```
+
+To run as a background service, use [NSSM](https://nssm.cc/):
+
+```powershell
+nssm install Sophia "C:\path\to\sophia\target\release\sophia.exe"
+nssm set Sophia AppDirectory "C:\path\to\sophia"
+nssm start Sophia
 ```
 
 ## Commands
@@ -196,5 +191,50 @@ sudo systemctl enable --now sophia-bot
 | `/memory` | Owner | View memory |
 | `/memory add <text>` | Owner | Add to memory |
 | `/memory clear` | Owner | Clear memory |
-| `/queue` | Owner | Queue status |
 | `/help` | Paired | Show help |
+
+## Architecture
+
+```
+src/
+  main.rs        — Entry point, auth, update loop, shutdown
+  config.rs      — Config struct, env loading, path constants
+  handlers.rs    — Command dispatch, message processing
+  inference.rs   — Claude CLI subprocess, JSON parsing
+  memory.rs      — Memory, dialogs, system prompt builder
+  pairing.rs     — Paired/pending users (both persistent)
+  queue.rs       — SQLite message queue
+  telegram.rs    — Reactions, send_long, download_media
+  update_check.rs — Periodic GitHub release checker
+
+data/
+  instructions/  — System prompt files (see below)
+  memory/        — Runtime memory (auto-managed via [MEMORY_UPDATE] tags)
+  dialogs/       — Per-user per-day conversation logs
+  users/         — Pairing data (paired.json, pending.json, owner.json)
+  files/         — Downloaded media files
+```
+
+### Instruction files
+
+All files in `data/instructions/` are loaded into the system prompt:
+
+| File | Purpose | In repo |
+|---|---|---|
+| `AGENTS.md` | Bootstrap: startup rules, memory protocol, red lines | Yes (template) |
+| `IDENTITY.md` | Bot identity: name, role, emoji, backstory | Yes (template) |
+| `SOUL.md` | Personality: thinking style, communication, boundaries | Yes (template) |
+| `USER.md` | Owner info: name, timezone, preferences | Yes (template) |
+| `TOOLS.md` | Environment-specific notes (SSH, TTS, APIs) | No (gitignored) |
+| `MEMORY.md` | Curated long-term memory | No (gitignored) |
+
+Copy `.example` files to get started:
+
+```bash
+cp data/instructions/TOOLS.md.example data/instructions/TOOLS.md
+cp data/instructions/MEMORY.md.example data/instructions/MEMORY.md
+```
+
+## License
+
+MIT

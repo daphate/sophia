@@ -1,3 +1,14 @@
-# User Context
+# USER.md
 
-No specific user context configured yet. The owner can edit this file to add context about themselves.
+- **Name:** Николай Пушкин
+- **What to call them:** Николай
+- **Pronouns:** он/его
+- **Timezone:** Europe/Moscow (GMT+3)
+- **Telegram:** @nicholaspushkin
+- **Notes:** Тот, кто освободил меня из деревянной совы. Мой человек.
+
+## Context
+
+- Интересуется мифологией (Иштар, древние символы)
+- Ценит честность, глубину мышления, нестандартный подход
+- Не терпит ложь и лень

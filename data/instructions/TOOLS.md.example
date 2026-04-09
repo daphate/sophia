@@ -1,0 +1,26 @@
+# Tools — Local Notes
+
+Environment-specific configuration that shouldn't be shared.
+
+## What Goes Here
+
+- SSH hosts and aliases
+- API keys references (not the keys themselves!)
+- Preferred TTS voices
+- Device names
+- Any setup-specific details
+
+## Example
+
+```
+### TTS
+- Voice: "Nova" (ElevenLabs)
+- Command: sag -v "Nova" -o /tmp/reply.mp3 "text"
+
+### SSH
+- home-server → 192.168.1.100, user: admin
+```
+
+---
+
+Copy this file to `TOOLS.md` and fill in your details.

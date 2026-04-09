@@ -1,0 +1,27 @@
+# Long-Term Memory
+
+This file stores curated facts the bot learns over time. It is loaded into the system prompt for every conversation.
+
+Memory updates happen automatically via `[MEMORY_UPDATE]` tags in bot responses. You can also edit this file manually.
+
+## Format
+
+```markdown
+## Section Name
+- Fact or preference
+- Another fact with [date] if relevant
+
+## Another Section
+- More facts
+```
+
+## Guidelines
+
+- Keep entries concise — this is loaded into every prompt
+- Remove outdated entries periodically
+- Group by topic, not chronologically
+- Don't store secrets here (it goes into the LLM context)
+
+---
+
+Copy this file to `MEMORY.md` to start building your bot's memory.
