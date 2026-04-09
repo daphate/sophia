@@ -3360,11 +3360,14 @@ dependencies = [
 name = "sophia-rescue"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "dotenvy",
- "reqwest",
- "serde",
- "serde_json",
+ "grammers-client",
+ "grammers-mtsender",
+ "grammers-session",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

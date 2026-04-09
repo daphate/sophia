@@ -2,8 +2,6 @@ use std::time::Instant;
 
 use tokio::process::Command;
 
-use crate::api::TgClient;
-
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 pub fn init_start_time() {
@@ -26,12 +24,7 @@ fn uptime_str() -> String {
 }
 
 /// Handle an incoming command. Returns response text or None to silently drop.
-pub async fn handle(tg: &TgClient, chat_id: i64, text: &str) -> Option<String> {
-    // Only respond to owner
-    if chat_id != tg.owner_id() {
-        return None;
-    }
-
+pub async fn handle(text: &str) -> Option<String> {
     let text = text.trim();
     let (cmd, args) = match text.split_once(' ') {
         Some((c, a)) => (c, a.trim()),
@@ -50,7 +43,7 @@ pub async fn handle(tg: &TgClient, chat_id: i64, text: &str) -> Option<String> {
                 Some(cmd_exec(args).await)
             }
         }
-        "/help" => Some(
+        "/help" | "/start" => Some(
             "🛟 sophia-rescue commands:\n\
              /ping — alive check\n\
              /status — main sophia process status\n\
@@ -60,12 +53,11 @@ pub async fn handle(tg: &TgClient, chat_id: i64, text: &str) -> Option<String> {
              /help — this message"
                 .into(),
         ),
-        _ => None, // Unknown commands: silent drop
+        _ => None,
     }
 }
 
 async fn cmd_status() -> String {
-    // Check launchctl status
     let output = Command::new("launchctl")
         .args(["list", "com.sophia.bot"])
         .output()
@@ -83,8 +75,6 @@ async fn cmd_status() -> String {
                 );
             }
 
-            // Parse PID and status from launchctl list output
-            // Format: "PID\tStatus\tLabel"
             let mut pid = "?".to_string();
             let mut exit_status = "?".to_string();
             for line in stdout.lines() {
@@ -95,7 +85,6 @@ async fn cmd_status() -> String {
                 }
             }
 
-            // Check log freshness
             let log_age = std::fs::metadata("/tmp/sophia.log")
                 .and_then(|m| m.modified())
                 .ok()
@@ -126,19 +115,14 @@ async fn cmd_status() -> String {
 }
 
 async fn cmd_restart() -> String {
-    // Get current UID for launchctl
     let uid_output = Command::new("id").arg("-u").output().await;
     let uid = match uid_output {
         Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        Err(_) => "501".to_string(), // fallback
+        Err(_) => "501".to_string(),
     };
 
     let output = Command::new("launchctl")
-        .args([
-            "kickstart",
-            "-k",
-            &format!("gui/{uid}/com.sophia.bot"),
-        ])
+        .args(["kickstart", "-k", &format!("gui/{uid}/com.sophia.bot")])
         .output()
         .await;
 
@@ -163,33 +147,22 @@ async fn cmd_restart() -> String {
 
 async fn cmd_logs(args: &str) -> String {
     let n: usize = args.parse().unwrap_or(50);
-    let n = n.min(200); // Cap at 200 lines
+    let n = n.min(200);
 
     let mut result = String::new();
 
-    // stdout log
     result.push_str("📄 /tmp/sophia.log:\n");
     match tail_file("/tmp/sophia.log", n).await {
-        Ok(lines) => {
-            result.push_str(&lines);
-        }
-        Err(e) => {
-            result.push_str(&format!("(error: {e})\n"));
-        }
+        Ok(lines) => result.push_str(&lines),
+        Err(e) => result.push_str(&format!("(error: {e})\n")),
     }
 
-    // stderr log
     result.push_str("\n📄 /tmp/sophia.err:\n");
     match tail_file("/tmp/sophia.err", n.min(30)).await {
-        Ok(lines) => {
-            result.push_str(&lines);
-        }
-        Err(e) => {
-            result.push_str(&format!("(error: {e})\n"));
-        }
+        Ok(lines) => result.push_str(&lines),
+        Err(e) => result.push_str(&format!("(error: {e})\n")),
     }
 
-    // Truncate to fit Telegram limit
     if result.len() > 4000 {
         result.truncate(4000);
         result.push_str("\n... (truncated)");
@@ -209,11 +182,7 @@ async fn tail_file(path: &str, n: usize) -> Result<String, String> {
 }
 
 async fn cmd_exec(cmd: &str) -> String {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .output()
-        .await;
+    let output = Command::new("sh").arg("-c").arg(cmd).output().await;
 
     match output {
         Ok(out) => {
@@ -235,7 +204,6 @@ async fn cmd_exec(cmd: &str) -> String {
                 result = format!("(exit code: {})", out.status.code().unwrap_or(-1));
             }
 
-            // Truncate
             if result.len() > 4000 {
                 result.truncate(4000);
                 result.push_str("\n... (truncated)");
