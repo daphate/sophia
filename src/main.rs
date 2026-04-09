@@ -14,8 +14,9 @@ use anyhow::{Context, Result};
 use grammers_client::client::{Client, UpdatesConfiguration};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
+use grammers_session::Session;
 use tokio::sync::broadcast;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tracing::{debug, error, info};
 
 use crate::config::Config;
@@ -168,31 +169,68 @@ async fn main() -> Result<()> {
     });
 
     // Periodic update check
-    let needs_restart = Arc::new(AtomicBool::new(false));
+    let update_state = update_check::UpdateState::new();
     if config.update_check_hours > 0 {
         let interval_secs = config.update_check_hours * 3600;
+        let us = update_state.clone();
+        let client_upd = client.clone();
+        let session_upd = Arc::clone(&session);
+        let owner_id = config.owner_id;
         let auto_update = config.auto_update;
-        let needs_restart = needs_restart.clone();
         let shutdown_tx_update = shutdown_tx.clone();
         let mut shutdown_rx_updates = shutdown_tx.subscribe();
         tokio::spawn(async move {
+            let do_check = || {
+                let us = us.clone();
+                let cl = client_upd.clone();
+                let sess = Arc::clone(&session_upd);
+                let stx = shutdown_tx_update.clone();
+                async move {
+                    if update_check::check_for_updates(&us).await.is_none() {
+                        return false;
+                    }
+                    if auto_update {
+                        let success = tokio::task::spawn_blocking(update_check::run_update)
+                            .await
+                            .unwrap_or(false);
+                        if success {
+                            us.needs_restart.store(true, Ordering::SeqCst);
+                            let _ = stx.send(());
+                            return true;
+                        }
+                    } else {
+                        // Notify owner
+                        let msg = {
+                            let guard = us.pending.lock().await;
+                            guard.as_ref().map(update_check::format_update_message)
+                        };
+                        if let Some(msg) = msg {
+                            let peer_id = grammers_session::types::PeerId::user_unchecked(owner_id);
+                            if let Some(peer) = sess.peer_ref(peer_id).await {
+                                let _ = telegram::send_long(&cl, peer, &msg).await;
+                            } else {
+                                info!("Cannot notify owner (peer not cached). Update pending, use /update");
+                            }
+                        }
+                    }
+                    false
+                }
+            };
+
             // Check immediately on startup
-            if update_check::check_for_updates(auto_update).await {
-                needs_restart.store(true, Ordering::SeqCst);
-                let _ = shutdown_tx_update.send(());
-                return;
-            }
+            if do_check().await { return; }
+
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             interval.tick().await; // skip first (already checked)
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if update_check::check_for_updates(auto_update).await {
-                            needs_restart.store(true, Ordering::SeqCst);
-                            let _ = shutdown_tx_update.send(());
-                            break;
+                        // Skip if already pending
+                        if us.pending.lock().await.is_some() {
+                            continue;
                         }
+                        if do_check().await { break; }
                     }
                     _ = shutdown_rx_updates.recv() => break,
                 }
@@ -226,9 +264,12 @@ async fn main() -> Result<()> {
                         let config = config.clone();
                         let queue = queue.clone();
                         let user_locks = user_locks.clone();
+                        let update_state = update_state.clone();
+                        let shutdown_tx = shutdown_tx.clone();
                         tokio::spawn(async move {
                             if let Err(e) = handlers::handle_update(
                                 &client, update, &config, me_id, &queue, &user_locks,
+                                &update_state, &shutdown_tx,
                             ).await {
                                 error!("Error handling update: {}", e);
                             }
@@ -250,7 +291,7 @@ async fn main() -> Result<()> {
     // Sync updates state before exit
     update_stream.sync_update_state().await;
 
-    if needs_restart.load(Ordering::SeqCst) {
+    if update_state.needs_restart.load(Ordering::SeqCst) {
         info!("Restarting after auto-update...");
         std::process::exit(update_check::EXIT_CODE_RESTART);
     }

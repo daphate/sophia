@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,7 +8,7 @@ use grammers_client::client::Client;
 use grammers_client::update::Update;
 use grammers_session::types::{PeerId, PeerKind, PeerRef};
 use regex::Regex;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
 use crate::config::Config;
@@ -16,6 +17,7 @@ use crate::memory;
 use crate::pairing;
 use crate::queue::MessageQueue;
 use crate::telegram;
+use crate::update_check::{self, UpdateState};
 
 /// Shared state for per-user locks.
 pub type UserLocks = Arc<DashMap<i64, Arc<Mutex<()>>>>;
@@ -38,6 +40,8 @@ pub async fn handle_update(
     me_id: PeerId,
     queue: &MessageQueue,
     user_locks: &UserLocks,
+    update_state: &UpdateState,
+    shutdown_tx: &broadcast::Sender<()>,
 ) -> Result<()> {
     match update {
         Update::NewMessage(message) => {
@@ -69,8 +73,11 @@ pub async fn handle_update(
                 return Ok(());
             }
 
-            handle_private_message(client, &message, config, sender_id, peer, queue, user_locks)
-                .await
+            handle_private_message(
+                client, &message, config, sender_id, peer, queue, user_locks,
+                update_state, shutdown_tx,
+            )
+            .await
         }
         _ => Ok(()),
     }
@@ -84,6 +91,8 @@ async fn handle_private_message(
     peer: PeerRef,
     queue: &MessageQueue,
     user_locks: &UserLocks,
+    update_state: &UpdateState,
+    shutdown_tx: &broadcast::Sender<()>,
 ) -> Result<()> {
     let text = message.text().trim().to_string();
     let has_media = message.media().is_some();
@@ -112,6 +121,9 @@ async fn handle_private_message(
             "/unpair" if is_owner => return handle_unpair(client, peer, arg).await,
             "/exec" if is_owner => return handle_exec(client, peer, arg, config).await,
             "/memory" if is_owner => return handle_memory(client, peer, arg).await,
+            "/update" if is_owner => {
+                return handle_update_cmd(client, peer, update_state, shutdown_tx).await;
+            }
             "/help" if is_owner || pairing::is_paired(sender_id) => {
                 return handle_help(client, peer, is_owner).await;
             }
@@ -460,6 +472,50 @@ async fn handle_memory(client: &Client, peer: PeerRef, arg: &str) -> Result<()> 
     Ok(())
 }
 
+async fn handle_update_cmd(
+    client: &Client,
+    peer: PeerRef,
+    update_state: &UpdateState,
+    shutdown_tx: &broadcast::Sender<()>,
+) -> Result<()> {
+    let has_pending = update_state.pending.lock().await.is_some();
+    if !has_pending {
+        telegram::send_long(client, peer, "Нет доступных обновлений.").await?;
+        return Ok(());
+    }
+
+    let ver = {
+        let guard = update_state.pending.lock().await;
+        guard.as_ref().map(|r| r.version.clone()).unwrap_or_default()
+    };
+
+    telegram::send_long(
+        client,
+        peer,
+        &format!("⏳ Обновляю до v{}... Это может занять несколько минут.", ver),
+    )
+    .await?;
+
+    let success = tokio::task::spawn_blocking(update_check::run_update)
+        .await
+        .unwrap_or(false);
+
+    if success {
+        telegram::send_long(client, peer, "✅ Обновление завершено. Перезапускаюсь...")
+            .await?;
+        update_state.needs_restart.store(true, Ordering::SeqCst);
+        let _ = shutdown_tx.send(());
+    } else {
+        telegram::send_long(
+            client,
+            peer,
+            "❌ Обновление не удалось. Проверь логи.",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn handle_help(client: &Client, peer: PeerRef, is_owner: bool) -> Result<()> {
     let mut lines = vec![
         "**Commands:**".to_string(),
@@ -476,6 +532,7 @@ async fn handle_help(client: &Client, peer: PeerRef, is_owner: bool) -> Result<(
         lines.push("`/memory` — View memory".to_string());
         lines.push("`/memory add <text>` — Add to memory".to_string());
         lines.push("`/memory clear` — Clear memory".to_string());
+        lines.push("`/update` — Install pending update and restart".to_string());
     }
     telegram::send_long(client, peer, &lines.join("\n")).await?;
     Ok(())
