@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "sophia-rescue"]
+resolver = "3"
+
 [package]
 name = "sophia"
 version = "1.0.0-beta"
