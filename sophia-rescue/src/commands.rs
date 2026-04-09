@@ -89,11 +89,19 @@ async fn cmd_status() -> String {
             let mut pid = "?".to_string();
             let mut exit_status = "?".to_string();
             for line in stdout.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 3 && parts[2] == "com.sophia.bot" {
-                    pid = parts[0].trim().replace('-', "not running");
-                    exit_status = parts[1].trim().to_string();
+                let line = line.trim().trim_end_matches(';');
+                if let Some((key, value)) = line.split_once(" = ") {
+                    let key = key.trim().trim_matches('"');
+                    let value = value.trim().trim_matches('"');
+                    match key {
+                        "PID" => pid = value.to_string(),
+                        "LastExitStatus" => exit_status = value.to_string(),
+                        _ => {}
+                    }
                 }
+            }
+            if pid == "?" {
+                pid = "not running".to_string();
             }
 
             let log_age = std::fs::metadata("/tmp/sophia.log")
@@ -175,7 +183,8 @@ async fn cmd_logs(args: &str) -> String {
     }
 
     if result.len() > 4000 {
-        result.truncate(4000);
+        let boundary = result.floor_char_boundary(4000);
+        result.truncate(boundary);
         result.push_str("\n... (truncated)");
     }
 
@@ -216,7 +225,8 @@ async fn cmd_exec(cmd: &str) -> String {
             }
 
             if result.len() > 4000 {
-                result.truncate(4000);
+                let boundary = result.floor_char_boundary(4000);
+                result.truncate(boundary);
                 result.push_str("\n... (truncated)");
             }
 
