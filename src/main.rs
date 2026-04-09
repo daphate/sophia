@@ -2,6 +2,7 @@ mod config;
 mod handlers;
 mod inference;
 mod memory;
+mod outbox;
 mod pairing;
 mod queue;
 mod telegram;
@@ -253,6 +254,13 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // Outbox watcher (send proactive messages via data/outbox/*.json)
+    outbox::spawn_outbox_watcher(
+        client.clone(),
+        Arc::clone(&session),
+        shutdown_tx.subscribe(),
+    );
 
     // Main update loop
     info!("Sophia is running. Press Ctrl+C to stop.");
