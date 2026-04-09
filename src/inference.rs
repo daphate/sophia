@@ -59,7 +59,7 @@ pub async fn ask_claude(
 
     let system_prompt = tokio::task::spawn_blocking({
         let recent = recent.clone();
-        move || build_system_prompt(&recent)
+        move || build_system_prompt(&recent, "")
     })
     .await
     .map_err(|e| InferenceError::Other(e.into()))?;
@@ -287,6 +287,7 @@ pub async fn ask_claude_streaming(
     message: &str,
     config: &Config,
     file_paths: Option<&[PathBuf]>,
+    semantic_context: &str,
 ) -> Result<mpsc::Receiver<StreamEvent>, InferenceError> {
     let recent = tokio::task::spawn_blocking({
         let user_id = user_id;
@@ -295,9 +296,10 @@ pub async fn ask_claude_streaming(
     .await
     .map_err(|e| InferenceError::Other(e.into()))?;
 
+    let semantic_ctx = semantic_context.to_string();
     let system_prompt = tokio::task::spawn_blocking({
         let recent = recent.clone();
-        move || build_system_prompt(&recent)
+        move || build_system_prompt(&recent, &semantic_ctx)
     })
     .await
     .map_err(|e| InferenceError::Other(e.into()))?;

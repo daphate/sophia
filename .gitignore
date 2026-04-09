@@ -12,3 +12,7 @@ data/files/
 data/queue.db*
 .claude/
 target/
+# Build artifacts and caches
+.fastembed_cache/
+data/models/
+data/vecstore.db*

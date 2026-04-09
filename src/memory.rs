@@ -72,7 +72,7 @@ pub fn extract_memory_updates(response: &str) -> (String, Vec<String>) {
 
 // --- System prompt ---
 
-pub fn build_system_prompt(recent_dialog: &str) -> String {
+pub fn build_system_prompt(recent_dialog: &str, semantic_context: &str) -> String {
     let agents = read_file_safe(&config::agents_file());
     let identity = read_file_safe(&config::identity_file());
     let soul = read_file_safe(&config::soul_file());
@@ -121,6 +121,9 @@ pub fn build_system_prompt(recent_dialog: &str) -> String {
     let memory_trimmed = memory.trim();
     if !memory_trimmed.is_empty() && !memory_trimmed.contains("No memories stored yet.") {
         parts.push(memory_trimmed.to_string());
+    }
+    if !semantic_context.is_empty() {
+        parts.push(semantic_context.to_string());
     }
     if !recent_dialog.is_empty() {
         parts.push(format!("# Recent Conversation\n{}", recent_dialog));

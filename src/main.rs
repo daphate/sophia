@@ -6,6 +6,7 @@ mod pairing;
 mod queue;
 mod telegram;
 mod update_check;
+mod vecstore;
 
 use std::io::{self, BufRead, Write as _};
 use std::sync::Arc;
@@ -18,6 +19,8 @@ use grammers_session::Session;
 use tokio::sync::broadcast;
 use std::sync::atomic::Ordering;
 use tracing::{debug, error, info};
+
+use crate::vecstore::VecStore;
 
 use crate::config::Config;
 use crate::pairing::save_owner;
@@ -136,6 +139,19 @@ async fn main() -> Result<()> {
     if recovered > 0 {
         info!("Recovered {} stuck messages from queue", recovered);
     }
+
+    // Initialize vector store for semantic search
+    let vecstore = Arc::new(
+        tokio::task::spawn_blocking(|| {
+            VecStore::new(
+                &config::data_dir().join("vecstore.db"),
+                &config::data_dir().join("vecstore.usearch"),
+            )
+        })
+        .await?
+        .context("Failed to initialize VecStore")?,
+    );
+    info!("VecStore ready ({} vectors)", vecstore.len());
 
     // Per-user locks
     let user_locks = handlers::new_user_locks();
@@ -266,10 +282,11 @@ async fn main() -> Result<()> {
                         let user_locks = user_locks.clone();
                         let update_state = update_state.clone();
                         let shutdown_tx = shutdown_tx.clone();
+                        let vecstore = Arc::clone(&vecstore);
                         tokio::spawn(async move {
                             if let Err(e) = handlers::handle_update(
                                 &client, update, &config, me_id, &queue, &user_locks,
-                                &update_state, &shutdown_tx,
+                                &update_state, &shutdown_tx, &vecstore,
                             ).await {
                                 error!("Error handling update: {}", e);
                             }

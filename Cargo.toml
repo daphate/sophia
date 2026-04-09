@@ -23,3 +23,5 @@ shlex = "1"
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 semver = "1"
+usearch = "2"
+fastembed = "5"
