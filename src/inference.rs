@@ -77,7 +77,6 @@ pub async fn ask_claude(
     prompt_parts.push(message.to_string());
     let full_message = prompt_parts.join("\n");
 
-    let max_tokens_str = config.max_tokens.to_string();
     let mut cmd = tokio::process::Command::new(&config.claude_cli);
     cmd.args([
         "-p",
@@ -88,9 +87,6 @@ pub async fn ask_claude(
         "--system-prompt",
         &system_prompt,
     ]);
-    if config.max_tokens > 0 {
-        cmd.args(["--max-tokens", &max_tokens_str]);
-    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -317,7 +313,6 @@ pub async fn ask_claude_streaming(
     prompt_parts.push(message.to_string());
     let full_message = prompt_parts.join("\n");
 
-    let max_tokens_str = config.max_tokens.to_string();
     let mut cmd = tokio::process::Command::new(&config.claude_cli);
     cmd.args([
         "-p",
@@ -329,9 +324,6 @@ pub async fn ask_claude_streaming(
         "--system-prompt",
         &system_prompt,
     ]);
-    if config.max_tokens > 0 {
-        cmd.args(["--max-tokens", &max_tokens_str]);
-    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
