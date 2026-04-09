@@ -1,8 +1,9 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use grammers_client::client::Client;
+use grammers_client::media::Attribute;
 use grammers_client::message::InputMessage;
 use grammers_session::types::PeerRef;
 use grammers_tl_types as tl;
@@ -139,6 +140,92 @@ pub async fn download_media(
             Ok(vec![])
         }
     }
+}
+
+/// Generate TTS audio and send as a Telegram voice message.
+/// Runs tts.sh to produce WAV, converts to OGG Opus via ffmpeg, uploads and sends.
+pub async fn send_voice(client: &Client, peer: PeerRef, text: &str) -> Result<()> {
+    let text = text.to_string();
+    let ogg_path = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let wav_path = format!("/tmp/sofia_voice_{}.wav", ts);
+        let ogg_path = format!("/tmp/sofia_voice_{}.ogg", ts);
+
+        // Generate WAV via Piper TTS
+        let tts_script = config::project_root().join("scripts/tts.sh");
+        let status = std::process::Command::new("bash")
+            .arg(&tts_script)
+            .arg(&text)
+            .arg(&wav_path)
+            .output()?;
+        if !status.status.success() {
+            anyhow::bail!(
+                "TTS failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        if !Path::new(&wav_path).exists() {
+            anyhow::bail!("TTS produced no output file");
+        }
+
+        // Convert WAV → OGG Opus via ffmpeg
+        let ffmpeg = std::process::Command::new("ffmpeg")
+            .args(["-y", "-i", &wav_path, "-c:a", "libopus", "-b:a", "64k", &ogg_path])
+            .output()?;
+        // Clean up WAV
+        let _ = std::fs::remove_file(&wav_path);
+        if !ffmpeg.status.success() {
+            anyhow::bail!(
+                "ffmpeg conversion failed: {}",
+                String::from_utf8_lossy(&ffmpeg.stderr)
+            );
+        }
+
+        Ok(PathBuf::from(ogg_path))
+    })
+    .await??;
+
+    // Get audio duration via ffprobe
+    let ogg_path_clone = ogg_path.clone();
+    let duration_secs = tokio::task::spawn_blocking(move || -> u64 {
+        let output = std::process::Command::new("ffprobe")
+            .args([
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(&ogg_path_clone)
+            .output();
+        match output {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.trim().parse::<f64>().unwrap_or(1.0).ceil() as u64
+            }
+            Err(_) => 1,
+        }
+    })
+    .await
+    .unwrap_or(1);
+
+    // Upload and send
+    let uploaded = client.upload_file(&ogg_path).await?;
+    let msg = InputMessage::new()
+        .mime_type("audio/ogg")
+        .document(uploaded)
+        .attribute(Attribute::Voice {
+            duration: Duration::from_secs(duration_secs),
+            waveform: None,
+        });
+    client.send_message(peer, msg).await?;
+
+    // Clean up OGG
+    let _ = tokio::fs::remove_file(&ogg_path).await;
+
+    info!("Sent voice message ({} sec)", duration_secs);
+    Ok(())
 }
 
 /// Send typing indicator.
