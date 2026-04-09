@@ -240,8 +240,21 @@ async fn process_message(
             .await?;
     }
 
-    // Thinking reaction
+    // Animated thinking reaction: cycle emojis every 5s so user sees we're alive
     telegram::react(client, peer, msg_id, "🤔").await;
+    let thinking_client = client.clone();
+    let thinking_peer = peer;
+    let thinking_msg_id = msg_id;
+    let thinking_task = tokio::spawn(async move {
+        const THINKING_EMOJIS: &[&str] = &["🤔", "🧐", "🤨", "💭", "🫠"];
+        let mut idx = 1; // start from 1 since we already set 🤔
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let emoji = THINKING_EMOJIS[idx % THINKING_EMOJIS.len()];
+            telegram::react(&thinking_client, thinking_peer, thinking_msg_id, emoji).await;
+            idx += 1;
+        }
+    });
 
     // Send typing indicator, keep refreshing it while inference runs
     telegram::send_typing(client, peer).await;
@@ -265,6 +278,7 @@ async fn process_message(
     let mut stream = match inference::ask_claude_streaming(sender_id, text, config, paths).await {
         Ok(rx) => rx,
         Err(e) => {
+            thinking_task.abort();
             typing_task.abort();
             telegram::react(client, peer, msg_id, "🥶").await;
             error!("Inference failed for msg {}: {}", msg_id, e);
@@ -304,6 +318,7 @@ async fn process_message(
                     && !display_text.trim().is_empty();
 
                 if should_update {
+                    thinking_task.abort(); // stop cycling thinking emojis
                     typing_task.abort(); // stop typing once we start showing text
                     let trimmed = display_text.trim_start().to_string();
                     match sent_msg_id {
@@ -362,6 +377,7 @@ async fn process_message(
                 cost_info = cost;
             }
             inference::StreamEvent::Error(e) => {
+                thinking_task.abort();
                 typing_task.abort();
                 telegram::react(client, peer, msg_id, "🥶").await;
                 error!("Streaming error for msg {}: {}", msg_id, e);
@@ -374,6 +390,7 @@ async fn process_message(
         }
     }
 
+    thinking_task.abort();
     typing_task.abort();
 
     // Extract and save memory updates
