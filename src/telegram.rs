@@ -64,10 +64,16 @@ pub async fn edit_message(client: &Client, peer: PeerRef, msg_id: i32, text: &st
     Ok(())
 }
 
-/// Send a message and return its ID.
+/// Send a message and return its ID. Truncates at Telegram's 4096-char limit.
 pub async fn send_and_get_id(client: &Client, peer: PeerRef, text: &str) -> Result<i32> {
+    let truncated = if char_len(text) > TG_MAX_CHARS {
+        let end = byte_offset_at_char(text, TG_MAX_CHARS);
+        &text[..end]
+    } else {
+        text
+    };
     let msg = client
-        .send_message(peer, InputMessage::new().text(text))
+        .send_message(peer, InputMessage::new().text(truncated))
         .await?;
     Ok(msg.id())
 }

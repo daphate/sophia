@@ -338,7 +338,7 @@ async fn process_message(
     let mut last_edit = tokio::time::Instant::now();
     let mut response = String::new();
     let mut cost_info: Option<inference::CostInfo> = None;
-    let edit_interval = std::time::Duration::from_millis(800);
+    let edit_interval = std::time::Duration::from_millis(1500);
     // Track how much text we've already sent in previous (completed) messages
     let mut sent_in_previous_msgs = 0usize;
 
@@ -391,7 +391,11 @@ async fn process_message(
                                 let _ = telegram::edit_message(client, peer, edit_id, final_chunk)
                                     .await;
                                 // Mark everything up to split_at as sent
-                                sent_in_previous_msgs += split_at;
+                                // split_at is a byte offset in `trimmed`, which has leading
+                                // whitespace removed from display_text. Account for that gap.
+                                let leading_ws = display_text.len() - trimmed.len();
+                                sent_in_previous_msgs += leading_ws + split_at;
+                                // Skip newlines right after the split point
                                 let remainder = accumulated[sent_in_previous_msgs..]
                                     .trim_start_matches('\n')
                                     .to_string();
@@ -457,9 +461,21 @@ async fn process_message(
         );
     }
 
-    // Final edit/send with the cleaned (memory-stripped) text
-    let display_final = if sent_in_previous_msgs > 0 {
-        cleaned[sent_in_previous_msgs.min(cleaned.len())..].trim_start_matches('\n')
+    // Final edit/send with the cleaned (memory-stripped) text.
+    // sent_in_previous_msgs tracks position in `accumulated`, but `cleaned` may be
+    // shorter if memory tags were removed. Recalculate by finding how much of the
+    // original `accumulated` prefix maps to `cleaned`.
+    let display_final = if sent_in_previous_msgs > 0 && sent_in_previous_msgs < accumulated.len() {
+        // Find the text we already sent (from accumulated) and locate its end in cleaned
+        let already_sent = &accumulated[..sent_in_previous_msgs];
+        // If cleaned starts with the same prefix, use the same offset; otherwise fall back
+        if cleaned.len() >= already_sent.len() && cleaned.starts_with(already_sent) {
+            cleaned[sent_in_previous_msgs..].trim_start_matches('\n')
+        } else {
+            // Memory tags were in the already-sent portion or text diverged — show remainder
+            let offset = sent_in_previous_msgs.min(cleaned.len());
+            cleaned[offset..].trim_start_matches('\n')
+        }
     } else {
         cleaned.trim_start()
     };

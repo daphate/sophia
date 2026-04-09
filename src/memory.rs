@@ -12,6 +12,18 @@ fn read_file_safe(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
+/// Truncate a string to at most `max_bytes` without splitting a UTF-8 char.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // --- Memory ---
 
 pub fn read_memory() -> String {
@@ -39,7 +51,8 @@ pub fn append_memory(text: &str) {
         if let Some(fact) = stripped.strip_prefix("- ") {
             let existing_norm = normalize_fact(fact);
             if !existing_norm.is_empty() && !new_norm.is_empty() && existing_norm == new_norm {
-                info!("Skipping duplicate memory entry: {}", &text[..text.len().min(80)]);
+                let preview = truncate_utf8(text, 80);
+                info!("Skipping duplicate memory entry: {}", preview);
                 return;
             }
         }
@@ -49,7 +62,7 @@ pub fn append_memory(text: &str) {
     let entry = format!("- [{}] {}\n", timestamp, text.trim());
     let new_content = format!("{}\n{}", current.trim_end(), entry);
     let _ = fs::write(config::memory_file(), new_content);
-    info!("Memory updated: {}", &text[..text.len().min(80)]);
+    info!("Memory updated: {}", truncate_utf8(text, 80));
 }
 
 pub fn clear_memory() {
