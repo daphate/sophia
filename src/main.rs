@@ -268,14 +268,24 @@ async fn main() -> Result<()> {
         .stream_updates(pool.updates, UpdatesConfiguration { catch_up: true, ..Default::default() })
         .await;
     let mut shutdown_rx = shutdown_tx.subscribe();
-    let mut sync_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut sync_interval = tokio::time::interval(std::time::Duration::from_secs(5));
     sync_interval.tick().await; // skip the immediate first tick
+    let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+    cleanup_interval.tick().await; // skip immediate tick
 
     loop {
         tokio::select! {
             _ = sync_interval.tick() => {
                 update_stream.sync_update_state().await;
                 debug!("Synced update state");
+            }
+            _ = cleanup_interval.tick() => {
+                let q = queue.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = q.cleanup(24) {
+                        tracing::error!("Queue cleanup failed: {}", e);
+                    }
+                });
             }
             update = update_stream.next() => {
                 match update {
@@ -305,6 +315,7 @@ async fn main() -> Result<()> {
                                 error!("Error handling update: {}", e);
                             }
                         });
+                        update_stream.sync_update_state().await;
                     }
                     Err(e) => {
                         error!("Error getting update: {}", e);
