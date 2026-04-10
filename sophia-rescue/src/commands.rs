@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use tokio::process::Command;
+use tracing::{error, info};
 
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
@@ -48,10 +49,8 @@ pub async fn handle(text: &str) -> String {
             if text.starts_with('/') {
                 format!("❓ Неизвестная команда: {cmd}\n\n{}", help_text())
             } else {
-                format!(
-                    "🛟 Я — rescue-бот. Слежу за основной Софией и могу её перезапустить.\n\n{}",
-                    help_text()
-                )
+                // Plain text → forward to Claude CLI for conversation
+                cmd_chat(text).await
             }
         }
     }
@@ -199,6 +198,178 @@ async fn tail_file(path: &str, n: usize) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn cmd_chat(user_text: &str) -> String {
+    let sophia_root = std::env::var("SOPHIA_ROOT")
+        .unwrap_or_else(|_| "/Users/lokitheone/sophia".into());
+    let claude_cli = std::env::var("CLAUDE_CLI").unwrap_or_else(|_| "claude".into());
+
+    let system_prompt = build_rescue_system_prompt(&sophia_root).await;
+
+    info!("Calling Claude CLI for chat: {} chars", user_text.len());
+
+    let result = Command::new(&claude_cli)
+        .args([
+            "-p",
+            "--output-format", "json",
+            "--dangerously-skip-permissions",
+            "--system-prompt", &system_prompt,
+        ])
+        .current_dir(&sophia_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let mut child = match result {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to spawn Claude CLI: {e}");
+            return format!("❌ Не удалось запустить Claude: {e}");
+        }
+    };
+
+    // Write user text to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(user_text.as_bytes()).await;
+        let _ = stdin.shutdown().await;
+    }
+
+    // Wait for result (up to 120s)
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            error!("Claude CLI error: {e}");
+            return format!("❌ Ошибка Claude: {e}");
+        }
+        Err(_) => {
+            error!("Claude CLI timed out after 120s");
+            return "⏱ Claude не ответил за 120 секунд.".into();
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse JSON response — extract "result" field
+    if let Some(text) = extract_claude_response(&stdout) {
+        if text.is_empty() {
+            "🤷 Claude вернул пустой ответ.".into()
+        } else if text.len() > 4000 {
+            let boundary = text.floor_char_boundary(4000);
+            format!("{}\n... (truncated)", &text[..boundary])
+        } else {
+            text
+        }
+    } else {
+        // Fallback: try raw stdout
+        let raw = stdout.trim();
+        if raw.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("Claude CLI empty output. stderr: {}", stderr.chars().take(500).collect::<String>());
+            "❌ Claude не вернул ответ.".into()
+        } else if raw.len() > 4000 {
+            let boundary = raw.floor_char_boundary(4000);
+            format!("{}\n... (truncated)", &raw[..boundary])
+        } else {
+            raw.to_string()
+        }
+    }
+}
+
+fn extract_claude_response(json_str: &str) -> Option<String> {
+    // Claude JSON output: find last line that parses as JSON with "result" field
+    for line in json_str.lines().rev() {
+        let line = line.trim();
+        if line.starts_with('{') {
+            // Try to extract "result" field manually (avoid serde dependency)
+            if let Some(pos) = line.find("\"result\"") {
+                // Find the string value after "result":
+                let after = &line[pos + 8..]; // skip "result"
+                if let Some(colon) = after.find(':') {
+                    let after_colon = after[colon + 1..].trim();
+                    if after_colon.starts_with('"') {
+                        // Extract quoted string value
+                        let content = &after_colon[1..];
+                        if let Some(end) = find_unescaped_quote(content) {
+                            let raw = &content[..end];
+                            return Some(unescape_json_string(raw));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_unescaped_quote(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2; // skip escaped char
+        } else if bytes[i] == b'"' {
+            return Some(i);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn unescape_json_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('"') => result.push('"'),
+                Some('\\') => result.push('\\'),
+                Some('/') => result.push('/'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+async fn build_rescue_system_prompt(sophia_root: &str) -> String {
+    let instructions_dir = format!("{sophia_root}/data/instructions");
+    let mut prompt = String::new();
+
+    // Load key instruction files
+    for filename in ["SOUL.md", "IDENTITY.md", "USER.md"] {
+        let path = format!("{instructions_dir}/{filename}");
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            prompt.push_str(&format!("# {filename}\n{content}\n\n"));
+        }
+    }
+
+    prompt.push_str(
+        "# Контекст\n\
+         Ты отвечаешь через rescue-бота (дублёр). Основная София может быть недоступна.\n\
+         У тебя есть доступ к рабочей директории sophia и всем инструментам Claude Code.\n\
+         Отвечай как София — кратко, по делу, с характером.\n\
+         Если просят починить или проверить основную Софию — используй доступные инструменты.\n"
+    );
+
+    prompt
 }
 
 async fn cmd_exec(cmd: &str) -> String {
