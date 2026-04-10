@@ -92,6 +92,9 @@ async fn resolve_peer(session: &SqliteSession, owner_id: i64) -> Option<PeerRef>
 }
 
 /// Check if a launchd service is alive by parsing `launchctl list <label>`.
+///
+/// `launchctl list <label>` returns a plist with `"PID" = <number>;`
+/// when the process is running, or no PID line when it's not.
 pub async fn is_service_alive(label: &str) -> bool {
     let output = Command::new("launchctl")
         .args(["list", label])
@@ -104,10 +107,16 @@ pub async fn is_service_alive(label: &str) -> bool {
                 return false;
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse plist format: "PID" = 12345;
             for line in stdout.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 3 && parts[2] == label {
-                    return parts[0].trim() != "-";
+                let trimmed = line.trim().trim_end_matches(';');
+                if let Some((key, value)) = trimmed.split_once(" = ") {
+                    let key = key.trim().trim_matches('"');
+                    if key == "PID" {
+                        let value = value.trim().trim_matches('"');
+                        // PID exists and is a number → alive
+                        return value.parse::<u64>().is_ok();
+                    }
                 }
             }
             false
