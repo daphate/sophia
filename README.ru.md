@@ -305,6 +305,7 @@ src/
   lib.rs          — Общая библиотека (реэкспортирует все модули ниже)
   main.rs         — Точка входа основного бота
   config.rs       — Конфигурация, загрузка .env, константы путей
+  format.rs       — Конвертация Markdown → Telegram HTML + нарезка сообщений
   handlers.rs     — Диспетчер команд, обработка сообщений
   inference.rs    — Подпроцесс Claude CLI, парсинг JSON
   memory.rs       — Память, диалоги, генерация системного промпта
@@ -318,6 +319,9 @@ src/
 
 sophia-rescue/src/
   main.rs         — Точка входа rescue-бота (использует общую библиотеку)
+
+sophia-nexus/src/
+  main.rs         — MCP-сервер для интеграции с Claude Code
 
 data/
   instructions/   — Файлы системного промпта (см. ниже)
@@ -347,6 +351,12 @@ data/
 cp data/instructions/TOOLS.md.example data/instructions/TOOLS.md
 cp data/instructions/MEMORY.md.example data/instructions/MEMORY.md
 ```
+
+## Sophia NEXUS (MCP-сервер)
+
+`sophia-nexus` — отдельный крейт в workspace, реализующий сервер [Model Context Protocol](https://modelcontextprotocol.io/). Даёт Claude Code (или любому MCP-совместимому клиенту) прямой доступ к данным Sophia: файлы личности, память, история диалогов, отправка сообщений в Telegram, семантический поиск.
+
+Конфигурация в `.mcp.json` в корне проекта. Собирается вместе со всеми крейтами: `cargo build --release`.
 
 ## Лицензия
 

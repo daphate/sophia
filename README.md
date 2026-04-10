@@ -313,6 +313,7 @@ src/
   lib.rs          — Shared library crate (re-exports all modules below)
   main.rs         — Entry point for main bot
   config.rs       — Config struct, env loading, path constants
+  format.rs       — Markdown → Telegram HTML converter + safe message splitting
   handlers.rs     — Command dispatch, message processing
   inference.rs    — Claude CLI subprocess, JSON parsing
   memory.rs       — Memory, dialogs, system prompt builder
@@ -327,6 +328,10 @@ src/
 sophia-rescue/
   src/
     main.rs       — Entry point for rescue bot (uses shared lib crate)
+
+sophia-nexus/
+  src/
+    main.rs       — MCP server for Claude Code integration
 
 data/
   instructions/  — System prompt files (see below)
@@ -357,6 +362,12 @@ Copy `.example` files to get started:
 cp data/instructions/TOOLS.md.example data/instructions/TOOLS.md
 cp data/instructions/MEMORY.md.example data/instructions/MEMORY.md
 ```
+
+## Sophia NEXUS (MCP Server)
+
+`sophia-nexus` is a separate workspace crate that implements a [Model Context Protocol](https://modelcontextprotocol.io/) server. It gives Claude Code (or any MCP-compatible client) direct access to Sophia's data: personality files, memory, dialog history, Telegram messaging, and semantic search.
+
+Configured in `.mcp.json` at the project root. Build with `cargo build --release` (workspace builds all crates).
 
 ## License
 

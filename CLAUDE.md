@@ -14,12 +14,14 @@
 
 ## Проект
 
-Этот репозиторий — **sophia-bot** v1.0-beta, нативный Rust Telegram-бот. Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs`. Работает как обычный бот (BOT_TOKEN).
+Этот репозиторий — **sophia-bot** v1.0-beta, нативный Rust Telegram-бот. Cargo workspace: lib+bin крейт (sophia), rescue-бот (sophia-rescue, `sophia = { path = ".." }`), MCP-сервер (sophia-nexus). Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs` — ноль дублирования кода. Работает как обычный бот (BOT_TOKEN).
 
 ### Структура
 - `src/` — исходники на Rust
 - `sophia-rescue/` — бот-спасатель и watchdog (компаньон основного бота)
   - `sophia-rescue/src/` — исходники rescue-бота на Rust
+- `sophia-nexus/` — MCP-сервер для интеграции с Claude Code (отдельный крейт)
+- `.mcp.json` — конфигурация sophia-nexus для Claude Code
 - `scripts/` — вспомогательные скрипты (tts.sh, stt.sh, send.sh, set-commands.sh)
 - `data/instructions/` — файлы личности и памяти (читаются ботом)
 - `data/memory/` — дневные заметки сессий
@@ -29,7 +31,7 @@
 #### Модули (`src/`)
 - `lib.rs` — общая библиотека (реэкспортирует все модули, используется обоими бинарниками)
 - `main.rs` — точка входа основного бота
-- `config.rs` — конфигурация из переменных окружения
+- `config.rs` — конфигурация из переменных окружения, BotRole (Main/Rescue)
 - `format.rs` — конвертация Markdown → Telegram HTML + безопасная нарезка сообщений
 - `handlers.rs` — обработка входящих сообщений, поддержка reply-цепочек (до 3 уровней вглубь для контекста)
 - `inference.rs` — интеграция с Claude CLI (таймауты: 5 мин idle, 10 мин hard)
