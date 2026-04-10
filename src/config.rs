@@ -11,6 +11,13 @@ pub enum BotMode {
     Userbot { phone_number: String },
 }
 
+/// Which role this binary plays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BotRole {
+    Main,
+    Rescue,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub api_id: i32,
@@ -18,6 +25,7 @@ pub struct Config {
     pub mode: BotMode,
     pub owner_id: i64,
     pub claude_cli: String,
+    pub anthropic_api_key: Option<String>,
     #[allow(dead_code)]
     pub inference_timeout: u64,
     pub session_name: String,
@@ -27,6 +35,10 @@ pub struct Config {
     pub update_check_hours: u64,
     /// Automatically pull, rebuild and restart on new version.
     pub auto_update: bool,
+    /// Which role this instance plays.
+    pub role: BotRole,
+    /// launchd service label of the *peer* bot (for /status, /restart, watchdog).
+    pub peer_service: String,
 }
 
 impl Config {
@@ -34,7 +46,43 @@ impl Config {
         matches!(self.mode, BotMode::Bot { .. })
     }
 
+    /// Load config for the main bot (reads BOT_TOKEN or PHONE_NUMBER).
     pub fn from_env() -> Result<Self> {
+        let mut cfg = Self::load_common()?;
+        cfg.role = BotRole::Main;
+        cfg.peer_service = "com.sophia.rescue".into();
+
+        let bot_token = std::env::var("BOT_TOKEN").ok();
+        let phone_number = std::env::var("PHONE_NUMBER").ok();
+        cfg.mode = match (bot_token, phone_number) {
+            (Some(token), _) => BotMode::Bot { token },
+            (None, Some(phone)) => BotMode::Userbot { phone_number: phone },
+            (None, None) => anyhow::bail!("Either BOT_TOKEN or PHONE_NUMBER must be set"),
+        };
+
+        if cfg.session_name == "sophia" || cfg.session_name.is_empty() {
+            cfg.session_name = "sophia".into();
+        }
+
+        Ok(cfg)
+    }
+
+    /// Load config for the rescue bot (reads RESCUE_BOT_TOKEN).
+    pub fn from_env_rescue() -> Result<Self> {
+        let mut cfg = Self::load_common()?;
+        cfg.role = BotRole::Rescue;
+        cfg.peer_service = "com.sophia.bot".into();
+
+        let token = std::env::var("RESCUE_BOT_TOKEN")
+            .context("RESCUE_BOT_TOKEN not set")?;
+        cfg.mode = BotMode::Bot { token };
+        cfg.session_name = "rescue".into();
+
+        Ok(cfg)
+    }
+
+    /// Shared config loading (everything except mode/role).
+    fn load_common() -> Result<Self> {
         dotenvy::dotenv().ok();
 
         let api_id: i32 = std::env::var("API_ID")
@@ -42,22 +90,13 @@ impl Config {
             .parse()
             .context("API_ID must be an integer")?;
         let api_hash = std::env::var("API_HASH").context("API_HASH not set")?;
-
-        let bot_token = std::env::var("BOT_TOKEN").ok();
-        let phone_number = std::env::var("PHONE_NUMBER").ok();
-
-        let mode = match (bot_token, phone_number) {
-            (Some(token), _) => BotMode::Bot { token },
-            (None, Some(phone)) => BotMode::Userbot { phone_number: phone },
-            (None, None) => anyhow::bail!("Either BOT_TOKEN or PHONE_NUMBER must be set"),
-        };
-
         let owner_id: i64 = std::env::var("OWNER_ID")
             .context("OWNER_ID not set")?
             .parse()
             .context("OWNER_ID must be an integer")?;
 
         let claude_cli = std::env::var("CLAUDE_CLI").unwrap_or_else(|_| "claude".into());
+        let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let inference_timeout: u64 = std::env::var("INFERENCE_TIMEOUT")
             .unwrap_or_else(|_| "150".into())
             .parse()
@@ -83,18 +122,22 @@ impl Config {
             .unwrap_or_else(|_| "false".into())
             .to_lowercase()
             == "true";
+
         Ok(Self {
             api_id,
             api_hash,
-            mode,
+            mode: BotMode::Bot { token: String::new() }, // placeholder, overwritten by caller
             owner_id,
             claude_cli,
+            anthropic_api_key,
             inference_timeout,
             session_name,
             exec_enabled,
             exec_allowed_commands,
             update_check_hours,
             auto_update,
+            role: BotRole::Main,       // overwritten by caller
+            peer_service: String::new(), // overwritten by caller
         })
     }
 }
@@ -168,6 +211,15 @@ pub fn instructions_memory_file() -> PathBuf {
     instructions_dir().join("MEMORY.md")
 }
 
+/// Queue DB path — separate per role to avoid double-processing.
+pub fn queue_db_for(role: BotRole) -> PathBuf {
+    match role {
+        BotRole::Main => data_dir().join("queue.db"),
+        BotRole::Rescue => data_dir().join("queue_rescue.db"),
+    }
+}
+
+/// Default queue DB (main bot). Kept for backward compat.
 pub fn queue_db() -> PathBuf {
-    data_dir().join("queue.db")
+    queue_db_for(BotRole::Main)
 }

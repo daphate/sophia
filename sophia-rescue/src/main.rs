@@ -1,39 +1,46 @@
-mod commands;
-mod config;
-mod watchdog;
+use sophia::config;
+use sophia::handlers;
+use sophia::outbox;
+use sophia::telegram;
+use sophia::update_check;
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use grammers_client::client::{Client, UpdatesConfiguration};
-use grammers_client::message::InputMessage;
-use grammers_client::update::Update;
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
-use grammers_session::types::{PeerId, PeerRef};
-#[allow(unused_imports)]
-use grammers_session::Session; // trait needed for peer_ref()
-use tracing::{error, info};
+use grammers_session::Session;
+use tokio::sync::broadcast;
+use std::sync::atomic::Ordering;
+use tracing::{debug, error, info};
 
-use config::Config;
+use sophia::vecstore::VecStore;
+use sophia::config::Config;
+use sophia::pairing::save_owner;
+use sophia::queue::MessageQueue;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let debug_mode = std::env::args().any(|a| a == "--debug");
+
+    let default_filter = if debug_mode { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .init();
 
-    commands::init_start_time();
+    handlers::init_start_time();
 
-    let config = Config::from_env().context("Failed to load config")?;
+    let config = Config::from_env_rescue().context("Failed to load rescue config")?;
     info!("sophia-rescue starting...");
-    info!("  sophia root: {}", config.sophia_root.display());
 
-    // Session & sender pool (same pattern as main sophia)
-    let session_path = config.sophia_root.join("rescue.session");
+    // Session & sender pool
+    let session_path = config::project_root()
+        .join(&config.session_name)
+        .with_extension("session");
     let session = Arc::new(
         SqliteSession::open(&session_path)
             .await
@@ -42,139 +49,196 @@ async fn main() -> Result<()> {
     let pool = SenderPool::new(Arc::clone(&session), config.api_id);
     let client = Client::new(pool.handle);
 
-    // Spawn the network I/O runner
     tokio::spawn(async move {
         pool.runner.run().await;
     });
 
     // Authenticate
     if !client.is_authorized().await? {
-        info!("Signing in as bot...");
-        client
-            .bot_sign_in(&config.bot_token, &config.api_hash)
-            .await
-            .context("Bot sign-in failed")?;
-        info!("Signed in successfully");
+        info!("Not authorized, signing in as bot...");
+        match &config.mode {
+            config::BotMode::Bot { token } => {
+                client
+                    .bot_sign_in(token, &config.api_hash)
+                    .await
+                    .context("Bot sign in failed")?;
+                info!("Signed in as bot");
+            }
+            _ => anyhow::bail!("Rescue bot must use BOT_TOKEN mode"),
+        }
     }
 
-    let me = client.get_me().await?;
-    info!(
-        "Logged in as {} (@{})",
-        me.first_name().unwrap_or("rescue"),
-        me.username().unwrap_or("?")
+    let me = client.get_me().await.context("Failed to get self")?;
+    let me_id = me.id();
+    let me_name = format!(
+        "{} {}",
+        me.first_name().unwrap_or(""),
+        me.last_name().unwrap_or("")
+    )
+    .trim()
+    .to_string();
+    info!("Logged in as {} (ID: {:?})", me_name, me_id);
+
+    // Save owner info
+    save_owner(&serde_json::json!({
+        "id": config.owner_id,
+        "bot_user_id": me_id.bare_id(),
+        "bot_name": me_name,
+    }))?;
+
+    // Initialize queue (rescue has its own queue DB)
+    let queue = MessageQueue::new(&config::queue_db_for(config.role))?;
+    let recovered = queue.recover()?;
+    if recovered > 0 {
+        info!("Recovered {} stuck messages from queue", recovered);
+    }
+
+    // Periodic recovery sweep
+    {
+        let queue_sweep = queue.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                let q = queue_sweep.clone();
+                match tokio::task::spawn_blocking(move || q.recover_stale(600.0)).await {
+                    Ok(Ok(n)) if n > 0 => info!("Recovery sweep: recovered {} stuck messages", n),
+                    Ok(Err(e)) => error!("Recovery sweep error: {}", e),
+                    Err(e) => error!("Recovery sweep task error: {}", e),
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    // Initialize vector store (shared with main bot)
+    let vecstore = Arc::new(
+        tokio::task::spawn_blocking(|| {
+            VecStore::new(
+                &config::data_dir().join("vecstore.db"),
+                &config::data_dir().join("vecstore.usearch"),
+            )
+        })
+        .await?
+        .context("Failed to initialize VecStore")?,
     );
+    info!("VecStore ready ({} vectors)", vecstore.len());
 
-    let owner_id = config.owner_id;
+    let user_locks = handlers::new_user_locks();
 
-    // Spawn watchdog (peer cache fills after owner sends first message)
-    let wd_client = client.clone();
-    let wd_session = Arc::clone(&session);
+    // Shutdown signal
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let shutdown_tx_clone = shutdown_tx.clone();
     tokio::spawn(async move {
-        watchdog::run(&wd_client, &wd_session, owner_id).await;
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for ctrl+c: {}", e);
+        }
+        info!("Shutdown signal received");
+        let _ = shutdown_tx_clone.send(());
     });
 
-    // Notify owner on startup (only if peer is already cached from a previous session)
-    if let Some(peer) = resolve_owner(&session, owner_id).await {
-        let _ = client
-            .send_message(
-                peer,
-                InputMessage::new().text("🛟 sophia-rescue запущена и следит за основной Софией."),
-            )
-            .await;
-    } else {
-        info!("Owner peer not cached yet — startup notification skipped. Send /ping to initialize.");
+    // Periodic queue cleanup
+    let queue_clone = queue.clone();
+    let mut shutdown_rx_cleanup = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = queue_clone.cleanup(24) {
+                        error!("Queue cleanup error: {}", e);
+                    }
+                }
+                _ = shutdown_rx_cleanup.recv() => break,
+            }
+        }
+    });
+
+    // Update check
+    let update_state = update_check::UpdateState::new();
+
+    // Outbox watcher
+    outbox::spawn_outbox_watcher(
+        client.clone(),
+        Arc::clone(&session),
+        shutdown_tx.subscribe(),
+    );
+
+    // Watchdog: monitor peer bot (main sophia)
+    {
+        let wd_client = client.clone();
+        let wd_session = Arc::clone(&session);
+        let owner_id = config.owner_id;
+        let peer_service = config.peer_service.clone();
+        tokio::spawn(async move {
+            sophia::watchdog::run(&wd_client, &wd_session, owner_id, &peer_service).await;
+        });
+    }
+
+    // Startup notification
+    info!("sophia-rescue is running. Press Ctrl+C to stop.");
+    {
+        let peer_id = grammers_session::types::PeerId::user_unchecked(config.owner_id);
+        if let Some(peer) = session.peer_ref(peer_id).await {
+            let _ = telegram::send_long(&client, peer, "🛟 sophia-rescue перезапустилась").await;
+        } else {
+            info!("Cannot send startup notification (owner peer not cached)");
+        }
     }
 
     // Main update loop
     let mut update_stream = client
-        .stream_updates(
-            pool.updates,
-            UpdatesConfiguration {
-                catch_up: false,
-                ..Default::default()
-            },
-        )
+        .stream_updates(pool.updates, UpdatesConfiguration { catch_up: false, ..Default::default() })
         .await;
-
-    info!("Listening for updates...");
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    let mut sync_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    sync_interval.tick().await;
 
     loop {
-        match update_stream.next().await {
-            Ok(update) => {
-                if let Update::NewMessage(message) = update {
-                    if message.outgoing() {
-                        update_stream.sync_update_state().await;
-                        continue;
-                    }
-
-                    let sender_id = match message.sender_id() {
-                        Some(id) => id.bare_id() as i64,
-                        None => {
-                            update_stream.sync_update_state().await;
-                            continue;
-                        }
-                    };
-
-                    // Only respond to owner
-                    if sender_id != owner_id {
-                        update_stream.sync_update_state().await;
-                        continue;
-                    }
-
-                    let text = message.text();
-                    if !text.is_empty() {
-                        let response = commands::handle(text).await;
-                        if let Some(peer) = message.peer_ref().await {
-                            send_long(&client, peer, &response).await;
-                        }
-                    }
-                }
-
+        tokio::select! {
+            _ = sync_interval.tick() => {
                 update_stream.sync_update_state().await;
             }
-            Err(e) => {
-                error!("Error getting update: {e}");
+            update = update_stream.next() => {
+                match update {
+                    Ok(update) => {
+                        let client = client.clone();
+                        let config = config.clone();
+                        let queue = queue.clone();
+                        let user_locks = user_locks.clone();
+                        let update_state = update_state.clone();
+                        let shutdown_tx = shutdown_tx.clone();
+                        let vecstore = Arc::clone(&vecstore);
+                        tokio::spawn(async move {
+                            if let Err(e) = handlers::handle_update(
+                                &client, update, &config, me_id, &queue, &user_locks,
+                                &update_state, &shutdown_tx, &vecstore,
+                            ).await {
+                                error!("Error handling update: {}", e);
+                            }
+                        });
+                        update_stream.sync_update_state().await;
+                    }
+                    Err(e) => {
+                        error!("Error getting update (will retry): {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Shutting down gracefully...");
                 break;
             }
         }
     }
 
-    Ok(())
-}
+    update_stream.sync_update_state().await;
 
-/// Resolve owner by ID using the session's peer cache.
-async fn resolve_owner(session: &SqliteSession, owner_id: i64) -> Option<PeerRef> {
-    let peer_id = PeerId::user_unchecked(owner_id);
-    session.peer_ref(peer_id).await
-}
-
-/// Send message, splitting at 4096 char Telegram limit.
-async fn send_long(client: &Client, peer: PeerRef, text: &str) {
-    const TG_MAX_CHARS: usize = 4096;
-
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if remaining.chars().count() <= TG_MAX_CHARS {
-            let _ = client
-                .send_message(peer, InputMessage::new().text(remaining))
-                .await;
-            break;
-        }
-
-        let byte_limit = remaining
-            .char_indices()
-            .nth(TG_MAX_CHARS)
-            .map(|(idx, _)| idx)
-            .unwrap_or(remaining.len());
-
-        let split_at = remaining[..byte_limit]
-            .rfind('\n')
-            .unwrap_or(byte_limit);
-
-        let _ = client
-            .send_message(peer, InputMessage::new().text(&remaining[..split_at]))
-            .await;
-
-        remaining = remaining[split_at..].trim_start_matches('\n');
+    if update_state.needs_restart.load(Ordering::SeqCst) {
+        info!("Restarting after auto-update...");
+        std::process::exit(update_check::EXIT_CODE_RESTART);
     }
+
+    info!("sophia-rescue stopped.");
+    Ok(())
 }

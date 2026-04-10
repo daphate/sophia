@@ -13,29 +13,41 @@ const CHECK_INTERVAL: u64 = 60;
 /// Alert after being dead this many seconds.
 const DEAD_THRESHOLD: u64 = 30;
 
-pub async fn run(client: &Client, session: &SqliteSession, owner_id: i64) {
-    // Wait for owner peer to appear in cache (populated when owner sends a message)
+/// Run the watchdog loop, monitoring a launchd service.
+///
+/// `service_label` — the launchd service to monitor (e.g. "com.sophia.bot")
+pub async fn run(
+    client: &Client,
+    session: &SqliteSession,
+    owner_id: i64,
+    service_label: &str,
+) {
     let peer = loop {
-        if let Some(p) = resolve_owner_peer(session, owner_id).await {
+        if let Some(p) = resolve_peer(session, owner_id).await {
             break p;
         }
-        warn!("Watchdog: owner peer not cached yet, retrying in {CHECK_INTERVAL}s...");
+        warn!(
+            "Watchdog: owner peer not cached yet, retrying in {}s...",
+            CHECK_INTERVAL
+        );
         tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL)).await;
     };
 
-    info!("Watchdog: resolved owner peer, monitoring started");
+    info!(
+        "Watchdog: resolved owner peer, monitoring {} started",
+        service_label
+    );
 
     let mut dead_since: Option<Instant> = None;
     let mut alerted = false;
 
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(CHECK_INTERVAL));
-    // Skip immediate first tick
-    interval.tick().await;
+    interval.tick().await; // skip immediate first tick
 
     loop {
         interval.tick().await;
 
-        let alive = is_sophia_alive().await;
+        let alive = is_service_alive(service_label).await;
 
         if alive {
             if dead_since.is_some() {
@@ -43,8 +55,10 @@ pub async fn run(client: &Client, session: &SqliteSession, owner_id: i64) {
                     let _ = client
                         .send_message(
                             peer,
-                            InputMessage::new()
-                                .text("✅ sophia recovered and is running again."),
+                            InputMessage::new().text(&format!(
+                                "✅ {} recovered and is running again.",
+                                service_label
+                            )),
                         )
                         .await;
                 }
@@ -60,9 +74,9 @@ pub async fn run(client: &Client, session: &SqliteSession, owner_id: i64) {
                     .send_message(
                         peer,
                         InputMessage::new().text(&format!(
-                            "🚨 sophia is down for >{DEAD_THRESHOLD}s!\n\
-                             launchd did not restart it.\n\
-                             Use /restart or /status to investigate."
+                            "🚨 {} is down for >{}s!\n\
+                             Use /restart or /status to investigate.",
+                            service_label, DEAD_THRESHOLD
                         )),
                     )
                     .await;
@@ -72,14 +86,15 @@ pub async fn run(client: &Client, session: &SqliteSession, owner_id: i64) {
     }
 }
 
-async fn resolve_owner_peer(session: &SqliteSession, owner_id: i64) -> Option<PeerRef> {
+async fn resolve_peer(session: &SqliteSession, owner_id: i64) -> Option<PeerRef> {
     let peer_id = PeerId::user_unchecked(owner_id);
     session.peer_ref(peer_id).await
 }
 
-async fn is_sophia_alive() -> bool {
+/// Check if a launchd service is alive by parsing `launchctl list <label>`.
+pub async fn is_service_alive(label: &str) -> bool {
     let output = Command::new("launchctl")
-        .args(["list", "com.sophia.bot"])
+        .args(["list", label])
         .output()
         .await;
 
@@ -91,7 +106,7 @@ async fn is_sophia_alive() -> bool {
             let stdout = String::from_utf8_lossy(&out.stdout);
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 3 && parts[2] == "com.sophia.bot" {
+                if parts.len() >= 3 && parts[2] == label {
                     return parts[0].trim() != "-";
                 }
             }

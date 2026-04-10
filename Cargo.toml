@@ -7,6 +7,14 @@ name = "sophia"
 version = "1.0.0-beta"
 edition = "2024"
 
+[lib]
+name = "sophia"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sophia"
+path = "src/main.rs"
+
 [dependencies]
 grammers-client = { version = "0.9", features = ["html"] }
 grammers-mtsender = "0.9"

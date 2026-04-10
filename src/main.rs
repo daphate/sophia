@@ -1,14 +1,11 @@
-mod config;
-mod format;
-mod handlers;
-mod inference;
-mod memory;
-mod outbox;
-mod pairing;
-mod queue;
-mod telegram;
-mod update_check;
-mod vecstore;
+use sophia::config;
+use sophia::handlers;
+use sophia::outbox;
+use sophia::pairing;
+use sophia::queue;
+use sophia::telegram;
+use sophia::update_check;
+use sophia::vecstore;
 
 use std::io::{self, BufRead, Write as _};
 use std::sync::Arc;
@@ -22,11 +19,10 @@ use tokio::sync::broadcast;
 use std::sync::atomic::Ordering;
 use tracing::{debug, error, info};
 
-use crate::vecstore::VecStore;
-
-use crate::config::Config;
-use crate::pairing::save_owner;
-use crate::queue::MessageQueue;
+use sophia::vecstore::VecStore;
+use sophia::config::Config;
+use sophia::pairing::save_owner;
+use sophia::queue::MessageQueue;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,6 +39,8 @@ async fn main() -> Result<()> {
     if debug_mode {
         info!("Debug mode enabled");
     }
+
+    handlers::init_start_time();
 
     let config = Config::from_env().context("Failed to load config")?;
     info!("Config loaded, connecting to Telegram...");
@@ -136,7 +134,7 @@ async fn main() -> Result<()> {
     }))?;
 
     // Initialize queue
-    let queue = MessageQueue::new(&config::queue_db())?;
+    let queue = MessageQueue::new(&config::queue_db_for(config.role))?;
     let recovered = queue.recover()?;
     if recovered > 0 {
         info!("Recovered {} stuck messages from queue", recovered);
@@ -349,8 +347,8 @@ async fn main() -> Result<()> {
                         update_stream.sync_update_state().await;
                     }
                     Err(e) => {
-                        error!("Error getting update: {}", e);
-                        break;
+                        error!("Error getting update (will retry): {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 }
             }

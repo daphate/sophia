@@ -3619,10 +3619,7 @@ name = "sophia-rescue"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dotenvy",
- "grammers-client",
- "grammers-mtsender",
- "grammers-session",
+ "sophia",
  "tokio",
  "tracing",
  "tracing-subscriber",

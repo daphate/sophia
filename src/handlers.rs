@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -23,6 +24,27 @@ use crate::vecstore::VecStore;
 
 /// Shared state for per-user locks.
 pub type UserLocks = Arc<DashMap<i64, Arc<Mutex<()>>>>;
+
+static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub fn init_start_time() {
+    START_TIME.get_or_init(Instant::now);
+}
+
+fn uptime_str() -> String {
+    let elapsed = START_TIME.get().map(|t| t.elapsed()).unwrap_or_default();
+    let secs = elapsed.as_secs();
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}h {m}m {s}s")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
 
 pub fn new_user_locks() -> UserLocks {
     Arc::new(DashMap::new())
@@ -232,7 +254,11 @@ async fn handle_private_message(
             }
             "/search" if is_owner => return handle_search(client, peer, arg, vecstore).await,
             "/reindex" if is_owner => return handle_reindex(client, peer, vecstore).await,
-            "/help" if is_owner || pairing::is_paired(sender_id) => {
+            "/status" if is_owner => return handle_status(client, peer, config).await,
+            "/restart" if is_owner => return handle_restart(client, peer, config).await,
+            "/logs" if is_owner => return handle_logs(client, peer, arg).await,
+            "/ping" if is_owner => return handle_ping(client, peer).await,
+            "/help" | "/start" if is_owner || pairing::is_paired(sender_id) => {
                 return handle_help(client, peer, is_owner).await;
             }
             _ => {}
@@ -979,6 +1005,10 @@ async fn handle_help(client: &Client, peer: PeerRef, is_owner: bool) -> Result<(
         lines.push("`/update` — Install pending update and restart".to_string());
         lines.push("`/search <query>` — Semantic search in dialogs".to_string());
         lines.push("`/reindex` — Reindex all dialog files".to_string());
+        lines.push("`/status` — Peer bot service status".to_string());
+        lines.push("`/restart` — Restart peer bot".to_string());
+        lines.push("`/logs [N]` — View recent log files".to_string());
+        lines.push("`/ping` — Alive check with uptime".to_string());
     }
     telegram::send_long(client, peer, &lines.join("\n")).await?;
     Ok(())
@@ -1093,4 +1123,145 @@ async fn handle_reindex(
     .await?;
 
     Ok(())
+}
+
+// --- Rescue / operational commands ---
+
+async fn handle_ping(client: &Client, peer: PeerRef) -> Result<()> {
+    telegram::send_long(
+        client,
+        peer,
+        &format!("🏓 pong (uptime: {})", uptime_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn handle_status(client: &Client, peer: PeerRef, config: &Config) -> Result<()> {
+    let label = config.peer_service.clone();
+    let output = tokio::process::Command::new("launchctl")
+        .args(["list", &label])
+        .output()
+        .await;
+
+    let text = match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+
+            if !out.status.success() {
+                format!("❌ {} not found in launchctl\n{}", label, stderr.trim())
+            } else {
+                let mut pid = "?".to_string();
+                let mut exit_status = "?".to_string();
+                for line in stdout.lines() {
+                    let line = line.trim().trim_end_matches(';');
+                    if let Some((key, value)) = line.split_once(" = ") {
+                        let key = key.trim().trim_matches('"');
+                        let value = value.trim().trim_matches('"');
+                        match key {
+                            "PID" => pid = value.to_string(),
+                            "LastExitStatus" => exit_status = value.to_string(),
+                            _ => {}
+                        }
+                    }
+                }
+                if pid == "?" {
+                    pid = "not running".to_string();
+                }
+
+                let log_age = std::fs::metadata("/tmp/sophia.log")
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| {
+                        let secs = d.as_secs();
+                        if secs < 60 {
+                            format!("{secs}s ago")
+                        } else if secs < 3600 {
+                            format!("{}m ago", secs / 60)
+                        } else {
+                            format!("{}h ago", secs / 3600)
+                        }
+                    })
+                    .unwrap_or_else(|| "unknown".into());
+
+                format!(
+                    "📊 {} status:\nPID: {}\nExit status: {}\nLast log: {}\nMy uptime: {}",
+                    label, pid, exit_status, log_age, uptime_str()
+                )
+            }
+        }
+        Err(e) => format!("❌ Failed to check launchctl: {e}"),
+    };
+
+    telegram::send_long(client, peer, &text).await?;
+    Ok(())
+}
+
+async fn handle_restart(client: &Client, peer: PeerRef, config: &Config) -> Result<()> {
+    let label = config.peer_service.clone();
+    let uid_output = tokio::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .await;
+    let uid = match uid_output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => "501".to_string(),
+    };
+
+    let output = tokio::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &format!("gui/{uid}/{label}")])
+        .output()
+        .await;
+
+    let text = match output {
+        Ok(out) => {
+            if out.status.success() {
+                format!("✅ {} restarted", label)
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                format!("❌ restart failed: {}", stderr.trim())
+            }
+        }
+        Err(e) => format!("❌ Failed to run launchctl: {e}"),
+    };
+
+    telegram::send_long(client, peer, &text).await?;
+    Ok(())
+}
+
+async fn handle_logs(client: &Client, peer: PeerRef, arg: &str) -> Result<()> {
+    let n: usize = arg.parse().unwrap_or(50).min(200);
+    let mut result = String::new();
+
+    result.push_str("📄 /tmp/sophia.log:\n");
+    match tail_file("/tmp/sophia.log", n).await {
+        Ok(lines) => result.push_str(&lines),
+        Err(e) => result.push_str(&format!("(error: {e})\n")),
+    }
+
+    result.push_str("\n📄 /tmp/sophia.err:\n");
+    match tail_file("/tmp/sophia.err", n.min(30)).await {
+        Ok(lines) => result.push_str(&lines),
+        Err(e) => result.push_str(&format!("(error: {e})\n")),
+    }
+
+    if result.len() > 4000 {
+        let boundary = result.floor_char_boundary(4000);
+        result.truncate(boundary);
+        result.push_str("\n... (truncated)");
+    }
+
+    telegram::send_long(client, peer, &result).await?;
+    Ok(())
+}
+
+async fn tail_file(path: &str, n: usize) -> Result<String, String> {
+    let output = tokio::process::Command::new("tail")
+        .args(["-n", &n.to_string(), path])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

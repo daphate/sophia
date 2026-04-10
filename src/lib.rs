@@ -1,0 +1,12 @@
+pub mod config;
+pub mod format;
+pub mod handlers;
+pub mod inference;
+pub mod memory;
+pub mod outbox;
+pub mod pairing;
+pub mod queue;
+pub mod telegram;
+pub mod update_check;
+pub mod vecstore;
+pub mod watchdog;
