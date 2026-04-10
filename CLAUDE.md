@@ -14,20 +14,21 @@
 
 ## Проект
 
-Этот репозиторий — **sophia-bot** v1.0-beta, нативный Rust Telegram-бот. Работает как обычный бот (BOT_TOKEN) или userbot (PHONE_NUMBER).
+Этот репозиторий — **sophia-bot** v1.0-beta, нативный Rust Telegram-бот. Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs`. Работает как обычный бот (BOT_TOKEN).
 
 ### Структура
 - `src/` — исходники на Rust
 - `sophia-rescue/` — бот-спасатель и watchdog (компаньон основного бота)
   - `sophia-rescue/src/` — исходники rescue-бота на Rust
-- `scripts/` — вспомогательные скрипты (tts.sh, stt.sh, send.sh)
+- `scripts/` — вспомогательные скрипты (tts.sh, stt.sh, send.sh, set-commands.sh)
 - `data/instructions/` — файлы личности и памяти (читаются ботом)
 - `data/memory/` — дневные заметки сессий
 - `data/users/` — данные пользователей
 - `data/dialogs/` — диалоги
 
 #### Модули (`src/`)
-- `main.rs` — точка входа, инициализация бота
+- `lib.rs` — общая библиотека (реэкспортирует все модули, используется обоими бинарниками)
+- `main.rs` — точка входа основного бота
 - `config.rs` — конфигурация из переменных окружения
 - `format.rs` — конвертация Markdown → Telegram HTML + безопасная нарезка сообщений
 - `handlers.rs` — обработка входящих сообщений, поддержка reply-цепочек (до 3 уровней вглубь для контекста)
@@ -39,10 +40,15 @@
 - `telegram.rs` — слой работы с Telegram API
 - `update_check.rs` — проверка обновлений
 - `vecstore.rs` — векторное хранилище для семантического поиска
+- `watchdog.rs` — мониторинг парного бота (проверка launchd-сервиса)
 
-### Команды
-- `cargo build --release` — сборка
-- `./target/release/sophia` — запуск
+### Сборка и запуск
+- `cargo build --release` — сборка обоих бинарников
+- `./target/release/sophia` — запуск основного бота
+- `./target/release/sophia-rescue` — запуск rescue-бота
+
+### Команды ботов
+Оба бота поддерживают: `/pair`, `/help`, `/memory`, `/exec`, `/update`, `/search`, `/reindex`, `/status`, `/restart`, `/logs`, `/ping`
 
 ### Деплой и рестарт
 

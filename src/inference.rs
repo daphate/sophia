@@ -10,6 +10,24 @@ use tracing::{debug, error, warn};
 use crate::config::Config;
 use crate::memory::{build_system_prompt, load_recent_dialog};
 
+/// Read the freshest OAuth token from ~/.claude/tokens/ so child `claude -p`
+/// processes use it via env var instead of touching token files themselves.
+/// This prevents refresh-token race conditions with the interactive session.
+fn read_oauth_token() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let base = std::path::Path::new(&home).join(".claude/tokens");
+    // Prefer "annual" (long-lived), fall back to "session"
+    for name in &["annual", "session"] {
+        if let Ok(token) = std::fs::read_to_string(base.join(name)) {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub struct CostInfo {
     pub input_tokens: u64,
@@ -83,10 +101,15 @@ pub async fn ask_claude(
         "--output-format",
         "json",
         "--verbose",
+        "--no-session-persistence",
         "--dangerously-skip-permissions",
         "--system-prompt",
         &system_prompt,
     ]);
+    // Pass fresh OAuth token via env so the child doesn't touch ~/.claude/tokens/
+    if let Some(token) = read_oauth_token() {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -323,10 +346,15 @@ pub async fn ask_claude_streaming(
         "stream-json",
         "--verbose",
         "--include-partial-messages",
+        "--no-session-persistence",
         "--dangerously-skip-permissions",
         "--system-prompt",
         &system_prompt,
     ]);
+    // Pass fresh OAuth token via env so the child doesn't touch ~/.claude/tokens/
+    if let Some(token) = read_oauth_token() {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());

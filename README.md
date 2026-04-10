@@ -2,7 +2,7 @@
 
 > Release date: 2026-04-09
 
-Telegram bot powered by Claude CLI. Works as a regular bot or userbot. Written in Rust.
+Telegram bot powered by Claude CLI. Written in Rust. Ships two binaries (main + rescue) that share a common library crate.
 
 Features: persistent memory, semantic search over conversation history, user pairing, OS command execution, per-user dialog history, proactive messaging, automatic update notifications.
 
@@ -248,6 +248,8 @@ nssm start Sophia
 
 ## Commands
 
+Both bots (main and rescue) support the same command set:
+
 | Command | Access | Description |
 |---|---|---|
 | `/pair` | Anyone | Request access |
@@ -258,32 +260,28 @@ nssm start Sophia
 | `/memory` | Owner | View memory |
 | `/memory add <text>` | Owner | Add to memory |
 | `/memory clear` | Owner | Clear memory |
+| `/update` | Owner | Check and install updates |
+| `/search <query>` | Owner | Search conversation history |
+| `/reindex` | Owner | Rebuild semantic search index |
+| `/status` | Owner | Check peer bot status |
+| `/restart` | Owner | Restart peer bot |
+| `/logs` | Owner | View recent log files |
+| `/ping` | Paired | Alive check with uptime |
 | `/help` | Paired | Show help |
 
 ## Rescue Bot
 
-`sophia-rescue` is a companion watchdog binary that lives in the `sophia-rescue/` directory of the same workspace. It is a separate Telegram bot that monitors the main sophia bot and can restart it if something goes wrong.
+`sophia-rescue` is a companion bot that shares the same library crate (`src/lib.rs`) as the main bot. Both binaries have full conversational capability and the same command set; the difference is which peer they monitor and restart.
 
-Built on the same stack (grammers), it runs as its own launchd service (`com.sophia.rescue`).
-
-**Commands:**
-
-| Command | Description |
-|---|---|
-| `/ping` | Check if the rescue bot is alive |
-| `/status` | Show status of the main sophia bot |
-| `/restart` | Restart the main sophia bot via launchd |
-| `/logs` | View recent logs |
-| `/exec` | Run an OS command |
-
-Plain text messages are forwarded to Claude CLI for conversation.
+The rescue bot runs as its own launchd/systemd service and acts as a watchdog for the main bot (and vice versa).
 
 **Setup:**
 
-1. Create a separate bot via [@BotFather](https://t.me/BotFather).
+1. Create a second bot via [@BotFather](https://t.me/BotFather).
 2. Set `RESCUE_BOT_TOKEN` in your `.env`.
-3. Build: `cargo build --release -p sophia-rescue`
-4. Install the launchd service (see [macOS (launchd)](#macos-launchd)).
+3. Build: `cargo build --release` (builds both binaries).
+4. Set up BotFather commands for both bots: `./scripts/set-commands.sh`
+5. Install the launchd service (see [macOS (launchd)](#macos-launchd)).
 
 ## Vector Store
 
@@ -308,9 +306,12 @@ The bot watches the `data/outbox/` directory and processes any `*.json` files it
 
 ## Architecture
 
+The project is a Cargo workspace with a shared library crate (`src/lib.rs`) and two binary crates (`src/main.rs` for the main bot, `sophia-rescue/` for the rescue bot). Both binaries link against the same library, so all core logic (handlers, inference, memory, pairing, etc.) is shared.
+
 ```
 src/
-  main.rs         — Entry point, auth, update loop, shutdown
+  lib.rs          — Shared library crate (re-exports all modules below)
+  main.rs         — Entry point for main bot
   config.rs       — Config struct, env loading, path constants
   handlers.rs     — Command dispatch, message processing
   inference.rs    — Claude CLI subprocess, JSON parsing
@@ -321,13 +322,11 @@ src/
   update_check.rs — Periodic GitHub release checker
   outbox.rs       — Proactive message sending via outbox files
   vecstore.rs     — Embedding + semantic search (fastembed + usearch)
+  watchdog.rs     — Peer bot health monitoring (launchd service checker)
 
 sophia-rescue/
   src/
-    main.rs       — Entry point, bot auth, update loop
-    config.rs     — Rescue bot config
-    commands.rs   — /ping, /status, /restart, /logs, /exec handlers
-    watchdog.rs   — Main bot health monitoring
+    main.rs       — Entry point for rescue bot (uses shared lib crate)
 
 data/
   instructions/  — System prompt files (see below)
