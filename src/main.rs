@@ -283,6 +283,18 @@ async fn main() -> Result<()> {
 
     // Main update loop
     info!("Sophia is running. Press Ctrl+C to stop.");
+
+    // Notify owner about restart
+    {
+        let peer_id = grammers_session::types::PeerId::user_unchecked(config.owner_id);
+        if let Some(peer) = session.peer_ref(peer_id).await {
+            if let Err(e) = telegram::send_long(&client, peer, "Перезапустилась 🦉").await {
+                info!("Could not send startup notification: {e}");
+            }
+        } else {
+            info!("Cannot send startup notification (owner peer not cached)");
+        }
+    }
     let mut update_stream = client
         .stream_updates(pool.updates, UpdatesConfiguration { catch_up: true, ..Default::default() })
         .await;
