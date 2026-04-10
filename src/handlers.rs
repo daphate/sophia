@@ -430,13 +430,15 @@ async fn process_message(
                                 let final_chunk = &trimmed[..split_at];
                                 let _ = telegram::edit_message(client, peer, edit_id, final_chunk)
                                     .await;
-                                // Mark everything up to split_at as sent
-                                // split_at is a byte offset in `trimmed`, which has leading
-                                // whitespace removed from display_text. Account for that gap.
+                                // Compute absolute position in `accumulated`.
+                                // display_text starts at `display_start` in accumulated;
+                                // trimmed is display_text with leading whitespace stripped;
+                                // split_at is a byte offset within trimmed.
+                                let display_start = accumulated.len() - display_text.len();
                                 let leading_ws = display_text.len() - trimmed.len();
-                                sent_in_previous_msgs += leading_ws + split_at;
+                                let abs_split = display_start + leading_ws + split_at;
                                 // Skip newlines right after the split point
-                                let safe_offset = accumulated.ceil_char_boundary(sent_in_previous_msgs);
+                                let safe_offset = accumulated.ceil_char_boundary(abs_split);
                                 let remainder = accumulated[safe_offset..]
                                     .trim_start_matches('\n')
                                     .to_string();
@@ -509,18 +511,24 @@ async fn process_message(
     // shorter if memory tags were removed. Recalculate by finding how much of the
     // original `accumulated` prefix maps to `cleaned`.
     let display_final = if sent_in_previous_msgs > 0 && sent_in_previous_msgs < accumulated.len() {
-        // Find the text we already sent (from accumulated) and locate its end in cleaned
+        // Find the text we already sent (from accumulated) and locate its end in cleaned.
         let safe_acc = accumulated.ceil_char_boundary(sent_in_previous_msgs);
         let already_sent = &accumulated[..safe_acc];
-        // If cleaned starts with the same prefix, use the same offset; otherwise fall back
+        // If cleaned starts with the same prefix, use the same byte offset
         if cleaned.len() >= already_sent.len() && cleaned.starts_with(already_sent) {
-            let safe_cleaned = cleaned.ceil_char_boundary(safe_acc);
-            cleaned[safe_cleaned..].trim_start_matches('\n')
+            // safe_acc is valid in cleaned because cleaned starts with already_sent
+            cleaned[safe_acc..].trim_start_matches('\n')
         } else {
-            // Memory tags were in the already-sent portion or text diverged — show remainder
-            let offset = sent_in_previous_msgs.min(cleaned.len());
-            let safe_offset = cleaned.ceil_char_boundary(offset);
-            cleaned[safe_offset..].trim_start_matches('\n')
+            // Memory tags were removed from the already-sent portion or text diverged.
+            // Count chars we already sent and skip that many chars in cleaned.
+            let chars_sent = accumulated[..safe_acc].chars().count();
+            let cleaned_offset = telegram::byte_offset_at_char(&cleaned, chars_sent);
+            let safe_offset = cleaned.ceil_char_boundary(cleaned_offset.min(cleaned.len()));
+            if safe_offset >= cleaned.len() {
+                ""
+            } else {
+                cleaned[safe_offset..].trim_start_matches('\n')
+            }
         }
     } else {
         cleaned.trim_start()

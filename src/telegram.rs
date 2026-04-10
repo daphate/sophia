@@ -10,7 +10,7 @@ use grammers_tl_types as tl;
 use tracing::{debug, info, warn};
 
 use crate::config;
-use crate::format::md_to_tg_html;
+use crate::format::{md_to_tg_html, close_open_tags, safe_html_split};
 
 const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
 pub const TG_MAX_CHARS: usize = 4096;
@@ -55,14 +55,15 @@ pub async fn react(client: &Client, peer: PeerRef, msg_id: i32, emoji: &str) {
 /// Edit an existing message with HTML formatting.
 pub async fn edit_message(client: &Client, peer: PeerRef, msg_id: i32, text: &str) -> Result<()> {
     let html = md_to_tg_html(text);
-    let truncated = if char_len(&html) > TG_MAX_CHARS {
+    let final_html = if char_len(&html) > TG_MAX_CHARS {
         let end = byte_offset_at_char(&html, TG_MAX_CHARS);
-        &html[..end]
+        let safe_end = html.ceil_char_boundary(end);
+        close_open_tags(&html[..safe_end])
     } else {
-        &html
+        html
     };
     client
-        .edit_message(peer, msg_id, InputMessage::new().html(truncated))
+        .edit_message(peer, msg_id, InputMessage::new().html(&final_html))
         .await?;
     Ok(())
 }
@@ -71,14 +72,15 @@ pub async fn edit_message(client: &Client, peer: PeerRef, msg_id: i32, text: &st
 /// Truncates at Telegram's 4096-char limit.
 pub async fn send_and_get_id(client: &Client, peer: PeerRef, text: &str) -> Result<i32> {
     let html = md_to_tg_html(text);
-    let truncated = if char_len(&html) > TG_MAX_CHARS {
+    let final_html = if char_len(&html) > TG_MAX_CHARS {
         let end = byte_offset_at_char(&html, TG_MAX_CHARS);
-        &html[..end]
+        let safe_end = html.ceil_char_boundary(end);
+        close_open_tags(&html[..safe_end])
     } else {
-        &html
+        html
     };
     let msg = client
-        .send_message(peer, InputMessage::new().html(truncated))
+        .send_message(peer, InputMessage::new().html(&final_html))
         .await?;
     Ok(msg.id())
 }
@@ -89,17 +91,17 @@ pub async fn send_long(client: &Client, peer: PeerRef, text: &str) -> Result<()>
     let mut remaining = html.as_str();
     while !remaining.is_empty() {
         if char_len(remaining) <= TG_MAX_CHARS {
+            let chunk = close_open_tags(remaining);
             client
-                .send_message(peer, InputMessage::new().html(remaining))
+                .send_message(peer, InputMessage::new().html(&chunk))
                 .await?;
             break;
         }
         let byte_limit = byte_offset_at_char(remaining, TG_MAX_CHARS);
-        let split_at = remaining[..byte_limit]
-            .rfind('\n')
-            .unwrap_or(byte_limit);
+        let split_at = safe_html_split(remaining, byte_limit);
+        let chunk = close_open_tags(&remaining[..split_at]);
         client
-            .send_message(peer, InputMessage::new().html(&remaining[..split_at]))
+            .send_message(peer, InputMessage::new().html(&chunk))
             .await?;
         remaining = remaining[split_at..].trim_start_matches('\n');
     }

@@ -200,6 +200,73 @@ enum ListKind {
     Unordered,
 }
 
+/// Close any HTML tags left open after truncation.
+///
+/// Scans `html` for `<tag>` and `</tag>`, tracks a stack of open tags,
+/// and appends closing tags for any that remain unclosed.
+/// Handles the tags Telegram supports: b, i, s, u, code, pre, a, blockquote.
+pub fn close_open_tags(html: &str) -> String {
+    let mut result = html.to_string();
+    let mut stack: Vec<String> = Vec::new();
+
+    let tag_re = regex::Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)(?:\s[^>]*)?>").unwrap();
+
+    // Self-closing tags we should ignore (none really used in TG, but be safe)
+    let void_tags: &[&str] = &["br", "hr", "img"];
+
+    for cap in tag_re.captures_iter(html) {
+        let is_closing = &cap[1] == "/";
+        let tag_name = cap[2].to_lowercase();
+
+        if void_tags.contains(&tag_name.as_str()) {
+            continue;
+        }
+
+        if is_closing {
+            // Pop matching tag from stack (search from top)
+            if let Some(pos) = stack.iter().rposition(|t| *t == tag_name) {
+                stack.remove(pos);
+            }
+        } else {
+            stack.push(tag_name);
+        }
+    }
+
+    // Close remaining open tags in reverse order
+    for tag in stack.iter().rev() {
+        result.push_str(&format!("</{}>", tag));
+    }
+
+    result
+}
+
+/// Find a safe split point in HTML text that doesn't break tags.
+/// Searches backwards from `pos` for a newline that is NOT inside a `<...>` tag.
+/// Returns the byte offset of the newline, or `pos` if no safe newline found.
+pub fn safe_html_split(html: &str, pos: usize) -> usize {
+    let bytes = html.as_bytes();
+    let mut i = pos.min(html.len());
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'\n' {
+            // Make sure we're not inside a tag: scan forward from this position
+            // to see if there's an unmatched '<' before the next '>'
+            let before = &html[..i];
+            let last_open = before.rfind('<');
+            let last_close = before.rfind('>');
+            let inside_tag = match (last_open, last_close) {
+                (Some(o), Some(c)) => o > c, // '<' after last '>' means we're in a tag
+                (Some(_), None) => true,      // '<' with no '>' means we're in a tag
+                _ => false,
+            };
+            if !inside_tag {
+                return i;
+            }
+        }
+    }
+    pos
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +318,43 @@ mod tests {
     #[test]
     fn test_plain_text_unchanged() {
         assert_eq!(md_to_tg_html("Just text"), "Just text");
+    }
+
+    #[test]
+    fn test_close_open_tags_basic() {
+        assert_eq!(close_open_tags("<b>hello"), "<b>hello</b>");
+        assert_eq!(close_open_tags("<b><i>hi"), "<b><i>hi</i></b>");
+        assert_eq!(close_open_tags("<b>ok</b>"), "<b>ok</b>");
+    }
+
+    #[test]
+    fn test_close_open_tags_nested() {
+        assert_eq!(
+            close_open_tags("<pre><code class=\"language-rust\">fn main()"),
+            "<pre><code class=\"language-rust\">fn main()</code></pre>"
+        );
+    }
+
+    #[test]
+    fn test_close_open_tags_already_closed() {
+        let html = "<b>bold</b> and <i>italic</i>";
+        assert_eq!(close_open_tags(html), html);
+    }
+
+    #[test]
+    fn test_safe_html_split() {
+        let html = "<b>hello\nworld</b>";
+        // '<b>hello' is 8 bytes, so '\n' is at offset 8
+        assert_eq!(safe_html_split(html, html.len()), 8);
+    }
+
+    #[test]
+    fn test_safe_html_split_inside_tag() {
+        // Newline inside a tag attribute should be skipped
+        let html = "<a href=\"http://example.com\n\">text\nmore</a>";
+        let result = safe_html_split(html, html.len());
+        // Should find the newline between "text" and "more", not the one inside the tag
+        assert_eq!(&html[result..result + 1], "\n");
+        assert!(result > 28); // past the tag
     }
 }
