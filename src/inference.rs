@@ -13,6 +13,15 @@ use crate::memory::{build_system_prompt, load_recent_dialog};
 /// Read the freshest OAuth token from ~/.claude/tokens/ so child `claude -p`
 /// processes use it via env var instead of touching token files themselves.
 /// This prevents refresh-token race conditions with the interactive session.
+/// Separate working directory for bot's `claude -p` calls so its throwaway
+/// sessions don't pollute the interactive Claude Code project.
+fn bot_session_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let dir = PathBuf::from(home).join("sophia/data/bot-sessions");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn read_oauth_token() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let base = std::path::Path::new(&home).join(".claude/tokens");
@@ -106,6 +115,8 @@ pub async fn ask_claude(
         "--system-prompt",
         &system_prompt,
     ]);
+    // Isolate bot sessions from interactive Claude Code project
+    cmd.current_dir(bot_session_dir());
     // Pass fresh OAuth token via env so the child doesn't touch ~/.claude/tokens/
     if let Some(token) = read_oauth_token() {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
@@ -351,6 +362,8 @@ pub async fn ask_claude_streaming(
         "--system-prompt",
         &system_prompt,
     ]);
+    // Isolate bot sessions from interactive Claude Code project
+    cmd.current_dir(bot_session_dir());
     // Pass fresh OAuth token via env so the child doesn't touch ~/.claude/tokens/
     if let Some(token) = read_oauth_token() {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
