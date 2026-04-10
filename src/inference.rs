@@ -280,6 +280,7 @@ pub async fn ask_claude_streaming(
     config: &Config,
     file_paths: Option<&[PathBuf]>,
     semantic_context: &str,
+    reply_context: Option<&str>,
 ) -> Result<mpsc::Receiver<StreamEvent>, InferenceError> {
     let recent = tokio::task::spawn_blocking({
         let user_id = user_id;
@@ -296,8 +297,14 @@ pub async fn ask_claude_streaming(
     .await
     .map_err(|e| InferenceError::Other(e.into()))?;
 
-    // Build prompt with file references
+    // Build prompt with reply context and file references
     let mut prompt_parts = Vec::new();
+    if let Some(ctx) = reply_context {
+        if !ctx.is_empty() {
+            prompt_parts.push(ctx.to_string());
+            prompt_parts.push(String::new());
+        }
+    }
     if let Some(paths) = file_paths {
         for fp in paths {
             prompt_parts.push(format!("[Attached file: {}]", fp.display()));

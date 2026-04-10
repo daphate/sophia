@@ -77,7 +77,7 @@ pub async fn handle_update(
             }
 
             handle_private_message(
-                client, &message, config, sender_id, peer, queue, user_locks,
+                client, &message, config, sender_id, me_id, peer, queue, user_locks,
                 update_state, shutdown_tx, vecstore,
             )
             .await
@@ -86,11 +86,101 @@ pub async fn handle_update(
     }
 }
 
+/// Fetch the reply chain for a message, walking up to `max_depth` levels.
+/// Returns a formatted string with the reply context, or empty string if no reply.
+async fn fetch_reply_chain(
+    client: &Client,
+    peer: PeerRef,
+    message: &grammers_client::update::Message,
+    me_id: i64,
+    max_depth: usize,
+) -> String {
+    // Check if this message is a reply
+    let reply_to_id = match message.reply_to_message_id() {
+        Some(id) => id,
+        None => return String::new(),
+    };
+
+    let mut chain: Vec<String> = Vec::new();
+    let mut current_id = reply_to_id;
+
+    for depth in 0..max_depth {
+        // Fetch the message by ID
+        let fetched = match client.get_messages_by_id(peer, &[current_id]).await {
+            Ok(msgs) => msgs.into_iter().next().flatten(),
+            Err(e) => {
+                warn!("Failed to fetch reply chain message {}: {}", current_id, e);
+                break;
+            }
+        };
+
+        let msg = match fetched {
+            Some(m) => m,
+            None => {
+                // Message was deleted
+                let prefix = ">".repeat(depth + 1);
+                chain.push(format!("{} [deleted message]", prefix));
+                break;
+            }
+        };
+
+        // Get sender name
+        let sender_name = if msg.sender_id().map(|id| id.bare_id()) == Some(me_id) {
+            "Sophia".to_string()
+        } else {
+            msg.sender()
+                .and_then(|s| s.name())
+                .unwrap_or("Unknown")
+                .to_string()
+        };
+
+        // Get message text or media indicator
+        let text = msg.text();
+        let content = if text.is_empty() {
+            if msg.media().is_some() {
+                "[media]".to_string()
+            } else {
+                "[empty]".to_string()
+            }
+        } else {
+            // Truncate to 300 chars, UTF-8 safe
+            let char_count = text.chars().count();
+            let truncated: String = text.chars().take(300).collect();
+            if char_count > 300 {
+                format!("{}...", truncated)
+            } else {
+                truncated
+            }
+        };
+
+        // Format timestamp
+        let time = msg.date().format("%H:%M");
+
+        let prefix = ">".repeat(depth + 1);
+        chain.push(format!("{} [{}, {}]: {}", prefix, sender_name, time, content));
+
+        // Walk up the chain
+        match msg.reply_to_message_id() {
+            Some(parent_id) => current_id = parent_id,
+            None => break,
+        }
+    }
+
+    if chain.is_empty() {
+        return String::new();
+    }
+
+    // Reverse so oldest message is first (outermost quote)
+    chain.reverse();
+    format!("[Reply context]\n{}\n[End reply context]", chain.join("\n"))
+}
+
 async fn handle_private_message(
     client: &Client,
     message: &grammers_client::update::Message,
     config: &Config,
     sender_id: i64,
+    me_id: PeerId,
     peer: PeerRef,
     queue: &MessageQueue,
     user_locks: &UserLocks,
@@ -173,6 +263,12 @@ async fn handle_private_message(
         return Ok(());
     }
 
+    // --- Fetch reply chain context ---
+    let reply_context = fetch_reply_chain(client, peer, message, me_id.bare_id() as i64, 3).await;
+    if !reply_context.is_empty() {
+        info!("Reply chain fetched for msg_id={} ({} bytes)", msg_id, reply_context.len());
+    }
+
     // --- Enqueue for debounce batching ---
     let file_paths_str = file_paths
         .iter()
@@ -184,8 +280,9 @@ async fn handle_private_message(
         let queue_clone = queue.clone();
         let text_clone = text.clone();
         let fp_clone = file_paths_str.clone();
+        let rc_clone = reply_context.clone();
         tokio::task::spawn_blocking(move || {
-            queue_clone.enqueue(sender_id, chat_id, msg_id, &text_clone, &fp_clone)
+            queue_clone.enqueue(sender_id, chat_id, msg_id, &text_clone, &fp_clone, &rc_clone)
         }).await??
     };
     if is_dup {
@@ -212,6 +309,13 @@ async fn handle_private_message(
         // Another handler already processed our messages
         return Ok(());
     }
+
+    // Extract reply context from the first message that has one
+    let batch_reply_context = msgs
+        .iter()
+        .find(|m| !m.reply_context.is_empty())
+        .map(|m| m.reply_context.clone())
+        .unwrap_or_default();
 
     // Combine texts and file paths from the batch
     let combined_text = msgs
@@ -241,8 +345,14 @@ async fn handle_private_message(
     // React only on the LAST message
     telegram::react(client, peer, last_msg_id, "🫡").await;
 
+    let reply_ctx = if batch_reply_context.is_empty() {
+        None
+    } else {
+        Some(batch_reply_context.as_str())
+    };
     let result = process_message(
         client, config, peer, last_msg_id, sender_id, &combined_text, &all_file_paths, vecstore,
+        reply_ctx,
     )
     .await;
 
@@ -277,6 +387,7 @@ async fn process_message(
     text: &str,
     file_paths: &[PathBuf],
     vecstore: &Arc<VecStore>,
+    reply_context: Option<&str>,
 ) -> Result<()> {
     // Log user message and index it in vecstore
     {
@@ -358,7 +469,7 @@ async fn process_message(
         Some(file_paths)
     };
     let mut stream = match inference::ask_claude_streaming(
-        sender_id, text, config, paths, &semantic_context,
+        sender_id, text, config, paths, &semantic_context, reply_context,
     ).await {
         Ok(rx) => rx,
         Err(e) => {

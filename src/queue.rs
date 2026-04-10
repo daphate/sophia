@@ -25,6 +25,7 @@ pub struct QueuedMessage {
     pub status: String,
     pub created_at: f64,
     pub file_paths: String,
+    pub reply_context: String,
 }
 
 #[derive(Clone)]
@@ -70,6 +71,19 @@ impl MessageQueue {
             )?;
         }
 
+        // Migration: add reply_context if missing
+        let has_reply_context = conn
+            .prepare("PRAGMA table_info(messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "reply_context");
+        if !has_reply_context {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN reply_context TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -95,6 +109,7 @@ impl MessageQueue {
         msg_id: i32,
         text: &str,
         file_paths: &str,
+        reply_context: &str,
     ) -> Result<(i64, bool)> {
         let conn = self.conn.lock().unwrap();
         let t = now();
@@ -132,9 +147,9 @@ impl MessageQueue {
         }
 
         conn.execute(
-            "INSERT INTO messages (sender_id, chat_id, msg_id, text, status, created_at, updated_at, file_paths) \
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5, ?6)",
-            rusqlite::params![sender_id, chat_id, msg_id, text, t, file_paths],
+            "INSERT INTO messages (sender_id, chat_id, msg_id, text, status, created_at, updated_at, file_paths, reply_context) \
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5, ?6, ?7)",
+            rusqlite::params![sender_id, chat_id, msg_id, text, t, file_paths, reply_context],
         )?;
         let id = conn.last_insert_rowid();
         Ok((id, false))
@@ -145,7 +160,7 @@ impl MessageQueue {
         let t = now();
 
         let mut stmt = conn.prepare(
-            "SELECT id, sender_id, chat_id, msg_id, text, status, created_at, file_paths \
+            "SELECT id, sender_id, chat_id, msg_id, text, status, created_at, file_paths, reply_context \
              FROM messages WHERE status = 'pending' AND sender_id = ?1 AND chat_id = ?2 \
              ORDER BY created_at ASC",
         )?;
@@ -160,6 +175,7 @@ impl MessageQueue {
                     status: row.get(5)?,
                     created_at: row.get(6)?,
                     file_paths: row.get(7)?,
+                    reply_context: row.get(8)?,
                 })
             })?
             .filter_map(|r| r.ok())
