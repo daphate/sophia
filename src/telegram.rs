@@ -10,6 +10,7 @@ use grammers_tl_types as tl;
 use tracing::{debug, info, warn};
 
 use crate::config;
+use crate::format::md_to_tg_html;
 
 const MAX_FILE_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
 pub const TG_MAX_CHARS: usize = 4096;
@@ -51,41 +52,45 @@ pub async fn react(client: &Client, peer: PeerRef, msg_id: i32, emoji: &str) {
     }
 }
 
-/// Edit an existing message.
+/// Edit an existing message with HTML formatting.
 pub async fn edit_message(client: &Client, peer: PeerRef, msg_id: i32, text: &str) -> Result<()> {
-    let truncated = if char_len(text) > TG_MAX_CHARS {
-        let end = byte_offset_at_char(text, TG_MAX_CHARS);
-        &text[..end]
+    let html = md_to_tg_html(text);
+    let truncated = if char_len(&html) > TG_MAX_CHARS {
+        let end = byte_offset_at_char(&html, TG_MAX_CHARS);
+        &html[..end]
     } else {
-        text
+        &html
     };
     client
-        .edit_message(peer, msg_id, InputMessage::new().text(truncated))
+        .edit_message(peer, msg_id, InputMessage::new().html(truncated))
         .await?;
     Ok(())
 }
 
-/// Send a message and return its ID. Truncates at Telegram's 4096-char limit.
+/// Send a message with HTML formatting and return its ID.
+/// Truncates at Telegram's 4096-char limit.
 pub async fn send_and_get_id(client: &Client, peer: PeerRef, text: &str) -> Result<i32> {
-    let truncated = if char_len(text) > TG_MAX_CHARS {
-        let end = byte_offset_at_char(text, TG_MAX_CHARS);
-        &text[..end]
+    let html = md_to_tg_html(text);
+    let truncated = if char_len(&html) > TG_MAX_CHARS {
+        let end = byte_offset_at_char(&html, TG_MAX_CHARS);
+        &html[..end]
     } else {
-        text
+        &html
     };
     let msg = client
-        .send_message(peer, InputMessage::new().text(truncated))
+        .send_message(peer, InputMessage::new().html(truncated))
         .await?;
     Ok(msg.id())
 }
 
-/// Send message, splitting at 4096 char Telegram limit.
+/// Send message with HTML formatting, splitting at 4096 char Telegram limit.
 pub async fn send_long(client: &Client, peer: PeerRef, text: &str) -> Result<()> {
-    let mut remaining = text;
+    let html = md_to_tg_html(text);
+    let mut remaining = html.as_str();
     while !remaining.is_empty() {
         if char_len(remaining) <= TG_MAX_CHARS {
             client
-                .send_message(peer, InputMessage::new().text(remaining))
+                .send_message(peer, InputMessage::new().html(remaining))
                 .await?;
             break;
         }
@@ -94,7 +99,7 @@ pub async fn send_long(client: &Client, peer: PeerRef, text: &str) -> Result<()>
             .rfind('\n')
             .unwrap_or(byte_limit);
         client
-            .send_message(peer, InputMessage::new().text(&remaining[..split_at]))
+            .send_message(peer, InputMessage::new().html(&remaining[..split_at]))
             .await?;
         remaining = remaining[split_at..].trim_start_matches('\n');
     }

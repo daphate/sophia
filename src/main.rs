@@ -1,4 +1,5 @@
 mod config;
+mod format;
 mod handlers;
 mod inference;
 mod memory;
