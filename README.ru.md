@@ -1,16 +1,32 @@
-# Sophia Bot
+# Sophia Bot v1.0-beta
 
-Telegram-юзербот на базе Claude CLI. Написан на Rust.
+> Дата релиза: 2026-04-09
 
-Возможности: постоянная память, пейринг пользователей, выполнение команд ОС, история диалогов.
+Telegram-бот на базе Claude CLI. Работает как обычный бот или юзербот. Написан на Rust.
 
-## Требования
+Возможности: постоянная память, пейринг пользователей, выполнение команд ОС, история диалогов по пользователям, семантический поиск, автоматическая проверка обновлений.
+
+## Быстрая установка
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/daphate/sophia/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/daphate/sophia/main/install.ps1 | iex
+```
+
+### Требования
 
 - [Rust](https://rustup.rs/) (stable, 1.75+)
 - Учётные данные Telegram API (`api_id`, `api_hash` с https://my.telegram.org)
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) установлен и авторизован (`claude login`)
 
-## Установка
+## Ручная установка
 
 ### 1. Клонирование и сборка
 
@@ -31,26 +47,33 @@ cp .env.example .env
 ```env
 API_ID=your_api_id
 API_HASH=your_api_hash
-PHONE_NUMBER=+1234567890
+# BOT_TOKEN для обычного режима, или PHONE_NUMBER для юзербота
+BOT_TOKEN=123456:ABC-DEF
+# PHONE_NUMBER=+1234567890
 OWNER_ID=your_telegram_id
 CLAUDE_CLI=claude
 INFERENCE_TIMEOUT=120
 SESSION_NAME=sophia
 EXEC_ENABLED=true
 EXEC_ALLOWED_COMMANDS=cat,echo,ls,pwd,date,whoami,uname,head,tail,wc,df,free,uptime,tee
+UPDATE_CHECK_HOURS=12
 ```
 
 | Переменная | Описание |
 |---|---|
 | `API_ID` | Telegram API ID с https://my.telegram.org |
 | `API_HASH` | Telegram API hash |
-| `PHONE_NUMBER` | Номер телефона Telegram-аккаунта, от имени которого работает бот |
+| `BOT_TOKEN` | Токен бота от [@BotFather](https://t.me/BotFather) (режим бота) |
+| `PHONE_NUMBER` | Номер телефона (режим юзербота). Требуется либо `BOT_TOKEN`, либо `PHONE_NUMBER` |
 | `OWNER_ID` | Ваш Telegram ID (числовой). Бот считает этого пользователя администратором |
 | `CLAUDE_CLI` | Путь к Claude CLI (по умолчанию: `claude`) |
 | `INFERENCE_TIMEOUT` | Макс. время ожидания ответа Claude в секундах (по умолчанию: `120`) |
 | `SESSION_NAME` | Имя файла сессии Telegram (по умолчанию: `sophia`) |
 | `EXEC_ENABLED` | Включить команду `/exec` (по умолчанию: `true`) |
 | `EXEC_ALLOWED_COMMANDS` | Белый список разрешённых команд ОС через запятую |
+| `UPDATE_CHECK_HOURS` | Интервал проверки обновлений в часах. `0` = отключено (по умолчанию: `12`) |
+| `AUTO_UPDATE` | Автоматически обновлять, пересобирать и перезапускать (по умолчанию: `false`) |
+| `RESCUE_BOT_TOKEN` | Токен бота-сторожа sophia-rescue (необязательно) |
 
 ### 3. Первый запуск
 
@@ -64,7 +87,49 @@ EXEC_ALLOWED_COMMANDS=cat,echo,ls,pwd,date,whoami,uname,head,tail,wc,df,free,upt
 
 После авторизации сессия сохраняется и повторный ввод не потребуется.
 
-### 4. Режим отладки
+### 4. Обновление
+
+Sophia проверяет обновления автоматически (каждые 12 часов по умолчанию).
+
+**Ручное обновление:**
+
+```bash
+cd sophia
+git pull
+cargo build --release
+```
+
+Затем перезапустите бота (см. ниже).
+
+**Автоматическое обновление:** установите `AUTO_UPDATE=true` в `.env`. При обнаружении новой версии бот выполнит pull, пересборку и перезапуск (код выхода 42 запускает перезапуск через сервис-менеджер).
+
+### 5. Перезапуск
+
+**systemd (Linux):**
+
+```bash
+sudo systemctl restart sophia-bot
+```
+
+**launchd (macOS):**
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.sophia.bot
+```
+
+**Windows (NSSM):**
+
+```powershell
+nssm restart Sophia
+```
+
+**Без сервис-менеджера:** используйте обёртку:
+
+```bash
+./run.sh
+```
+
+### 6. Режим отладки
 
 ```bash
 ./target/release/sophia --debug
@@ -93,7 +158,9 @@ User=your_user
 
 ### macOS (launchd)
 
-Создайте `~/Library/LaunchAgents/com.sophia.bot.plist`:
+Два launchd-сервиса: основной бот и бот-сторож.
+
+**com.sophia.bot** — основной бот. Создайте `~/Library/LaunchAgents/com.sophia.bot.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -121,8 +188,37 @@ User=your_user
 </plist>
 ```
 
+**com.sophia.rescue** — бот-сторож (см. раздел Rescue Bot ниже). Создайте `~/Library/LaunchAgents/com.sophia.rescue.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sophia.rescue</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/sophia/target/release/sophia-rescue</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/sophia</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/sophia-rescue.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/sophia-rescue.err</string>
+</dict>
+</plist>
+```
+
 ```bash
 launchctl load ~/Library/LaunchAgents/com.sophia.bot.plist
+launchctl load ~/Library/LaunchAgents/com.sophia.rescue.plist
 ```
 
 ### Windows
@@ -160,25 +256,71 @@ nssm start Sophia
 | `/memory clear` | Владелец | Очистить память |
 | `/help` | Спаренные | Показать справку |
 
+## Rescue Bot (sophia-rescue)
+
+Отдельный бинарник-сторож, мониторящий основного бота через независимого Telegram-бота. Использует библиотеку grammers. Требует переменную окружения `RESCUE_BOT_TOKEN`.
+
+Команды rescue-бота:
+
+| Команда | Описание |
+|---|---|
+| `/ping` | Проверить доступность основного бота |
+| `/status` | Статус launchd-сервиса com.sophia.bot |
+| `/restart` | Перезапустить основного бота |
+| `/logs` | Показать последние строки лога |
+| `/exec <cmd>` | Выполнить произвольную команду |
+
+Сборка:
+
+```bash
+cargo build --release --bin sophia-rescue
+```
+
+## Семантический поиск (Vector Store)
+
+Sophia индексирует историю диалогов для семантического поиска. Используется [fastembed](https://github.com/Anush008/fastembed-rs) (модель `multilingual-e5-small`, 384 измерения) + [usearch](https://github.com/unum-cloud/usearch) для векторного хранилища.
+
+Данные сохраняются в `data/vecstore.usearch`.
+
+## Очередь сообщений (Message Queue)
+
+SQLite-очередь (`queue.db`) для дедупликации входящих сообщений. Предотвращает повторную обработку при перезапусках.
+
+## Исходящие сообщения (Outbox)
+
+Проактивная отправка сообщений через файлы `data/outbox/*.json`. Скрипт `scripts/send.sh` создаёт файл сообщения, бот подхватывает и отправляет его автоматически.
+
 ## Архитектура
+
+11 модулей в `src/`:
 
 ```
 src/
-  main.rs        — Точка входа, авторизация, цикл обновлений, graceful shutdown
-  config.rs      — Конфигурация, загрузка .env, константы путей
-  handlers.rs    — Диспетчер команд, обработка сообщений
-  inference.rs   — Подпроцесс Claude CLI, парсинг JSON
-  memory.rs      — Память, диалоги, генерация системного промпта
-  pairing.rs     — Спаренные/ожидающие пользователи (оба persistent)
-  queue.rs       — SQLite очередь сообщений
-  telegram.rs    — Реакции, отправка длинных сообщений, скачивание медиа
+  main.rs         — Точка входа, авторизация, цикл обновлений, graceful shutdown
+  config.rs       — Конфигурация, загрузка .env, константы путей
+  handlers.rs     — Диспетчер команд, обработка сообщений
+  inference.rs    — Подпроцесс Claude CLI, парсинг JSON
+  memory.rs       — Память, диалоги, генерация системного промпта
+  outbox.rs       — Проактивная отправка сообщений через outbox
+  pairing.rs      — Спаренные/ожидающие пользователи (оба persistent)
+  queue.rs        — SQLite очередь сообщений с дедупликацией
+  telegram.rs     — Реакции, отправка длинных сообщений, скачивание медиа
+  update_check.rs — Периодическая проверка обновлений на GitHub
+  vecstore.rs     — Векторное хранилище (fastembed + usearch)
+
+sophia-rescue/src/
+  main.rs         — Точка входа rescue-бота
+  config.rs       — Конфигурация rescue-бота
+  commands.rs     — Обработчики команд (/ping, /status, /restart, /logs, /exec)
+  watchdog.rs     — Мониторинг основного бота
 
 data/
-  instructions/  — Файлы системного промпта (см. ниже)
-  memory/        — Рантайм-память (авто через [MEMORY_UPDATE] теги)
-  dialogs/       — Логи диалогов по пользователям и дням
-  users/         — Данные пейринга (paired.json, pending.json, owner.json)
-  files/         — Скачанные медиафайлы
+  instructions/   — Файлы системного промпта (см. ниже)
+  memory/         — Рантайм-память (авто через [MEMORY_UPDATE] теги)
+  dialogs/        — Логи диалогов по пользователям и дням
+  users/          — Данные пейринга (paired.json, pending.json, owner.json)
+  files/          — Скачанные медиафайлы
+  outbox/         — JSON-файлы исходящих сообщений
 ```
 
 ### Файлы инструкций

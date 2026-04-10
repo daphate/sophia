@@ -13,15 +13,11 @@ fn read_file_safe(path: &Path) -> String {
 }
 
 /// Truncate a string to at most `max_bytes` without splitting a UTF-8 char.
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..s.floor_char_boundary(max_bytes)]
 }
 
 // --- Memory ---
@@ -96,10 +92,7 @@ pub fn build_system_prompt(recent_dialog: &str, semantic_context: &str) -> Strin
 
     // Truncate memory if too long (8 KiB is fine with 1M context)
     if memory.len() > 8192 {
-        let mut start = memory.len() - 8192;
-        while !memory.is_char_boundary(start) {
-            start += 1;
-        }
+        let start = memory.ceil_char_boundary(memory.len() - 8192);
         memory = format!(
             "# Memory\n…(older entries truncated)\n{}",
             &memory[start..]
@@ -188,10 +181,7 @@ pub fn load_recent_dialog(user_id: i64, max_turns: usize, max_total_chars: usize
         .rev()
         .map(|t| {
             if t.len() > 300 {
-                let mut end = 300;
-                while !t.is_char_boundary(end) {
-                    end -= 1;
-                }
+                let end = t.floor_char_boundary(300);
                 format!("{}…(truncated)", &t[..end])
             } else {
                 t.to_string()

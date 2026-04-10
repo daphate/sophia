@@ -18,6 +18,7 @@ use crate::pairing;
 use crate::queue::MessageQueue;
 use crate::telegram;
 use crate::update_check::{self, UpdateState};
+
 use crate::vecstore::VecStore;
 
 /// Shared state for per-user locks.
@@ -369,7 +370,8 @@ async fn process_message(
                 }
 
                 let display_text = if sent_in_previous_msgs > 0 {
-                    &accumulated[sent_in_previous_msgs..]
+                    let safe_offset = accumulated.ceil_char_boundary(sent_in_previous_msgs);
+                    &accumulated[safe_offset..]
                 } else {
                     &accumulated
                 };
@@ -412,7 +414,8 @@ async fn process_message(
                                 let leading_ws = display_text.len() - trimmed.len();
                                 sent_in_previous_msgs += leading_ws + split_at;
                                 // Skip newlines right after the split point
-                                let remainder = accumulated[sent_in_previous_msgs..]
+                                let safe_offset = accumulated.ceil_char_boundary(sent_in_previous_msgs);
+                                let remainder = accumulated[safe_offset..]
                                     .trim_start_matches('\n')
                                     .to_string();
                                 sent_in_previous_msgs = accumulated.len() - remainder.len();
@@ -483,14 +486,17 @@ async fn process_message(
     // original `accumulated` prefix maps to `cleaned`.
     let display_final = if sent_in_previous_msgs > 0 && sent_in_previous_msgs < accumulated.len() {
         // Find the text we already sent (from accumulated) and locate its end in cleaned
-        let already_sent = &accumulated[..sent_in_previous_msgs];
+        let safe_acc = accumulated.ceil_char_boundary(sent_in_previous_msgs);
+        let already_sent = &accumulated[..safe_acc];
         // If cleaned starts with the same prefix, use the same offset; otherwise fall back
         if cleaned.len() >= already_sent.len() && cleaned.starts_with(already_sent) {
-            cleaned[sent_in_previous_msgs..].trim_start_matches('\n')
+            let safe_cleaned = cleaned.ceil_char_boundary(safe_acc);
+            cleaned[safe_cleaned..].trim_start_matches('\n')
         } else {
             // Memory tags were in the already-sent portion or text diverged — show remainder
             let offset = sent_in_previous_msgs.min(cleaned.len());
-            cleaned[offset..].trim_start_matches('\n')
+            let safe_offset = cleaned.ceil_char_boundary(offset);
+            cleaned[safe_offset..].trim_start_matches('\n')
         }
     } else {
         cleaned.trim_start()
@@ -722,11 +728,7 @@ async fn handle_exec(client: &Client, peer: PeerRef, arg: &str, config: &Config)
     let output = if output.is_empty() {
         "(no output)"
     } else if output.len() > 4000 {
-        let mut end = 4000;
-        while !output.is_char_boundary(end) {
-            end -= 1;
-        }
-        &output[..end]
+        &output[..output.floor_char_boundary(4000)]
     } else {
         output
     };
@@ -860,10 +862,7 @@ async fn handle_search(
     let mut lines = vec![format!("**Результаты поиска** ({} шт, {} в индексе):", results.len(), vecstore.len())];
     for (i, r) in results.iter().enumerate() {
         let text_preview = if r.text.len() > 150 {
-            let mut end = 150;
-            while !r.text.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = r.text.floor_char_boundary(150);
             format!("{}...", &r.text[..end])
         } else {
             r.text.clone()

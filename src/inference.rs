@@ -163,11 +163,7 @@ pub async fn ask_claude(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let truncated = if stderr.len() > 500 {
-            let mut end = 500;
-            while !stderr.is_char_boundary(end) {
-                end -= 1;
-            }
-            &stderr[..end]
+            &stderr[..stderr.floor_char_boundary(500)]
         } else {
             &stderr
         };

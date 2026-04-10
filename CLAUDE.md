@@ -18,6 +18,9 @@
 
 ### Структура
 - `src/` — исходники на Rust
+- `sophia-rescue/` — бот-спасатель и watchdog (компаньон основного бота)
+  - `sophia-rescue/src/` — исходники rescue-бота на Rust
+- `scripts/` — вспомогательные скрипты (tts.sh, stt.sh, send.sh)
 - `data/instructions/` — файлы личности и памяти (читаются ботом)
 - `data/memory/` — дневные заметки сессий
 - `data/users/` — данные пользователей

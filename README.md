@@ -4,7 +4,7 @@
 
 Telegram bot powered by Claude CLI. Works as a regular bot or userbot. Written in Rust.
 
-Features: persistent memory, user pairing, OS command execution, per-user dialog history, automatic update notifications.
+Features: persistent memory, semantic search over conversation history, user pairing, OS command execution, per-user dialog history, proactive messaging, automatic update notifications.
 
 ## Quick install
 
@@ -73,6 +73,7 @@ UPDATE_CHECK_HOURS=12
 | `EXEC_ALLOWED_COMMANDS` | Comma-separated whitelist of allowed OS commands |
 | `UPDATE_CHECK_HOURS` | How often to check for updates, in hours. `0` = disabled (default: `12`) |
 | `AUTO_UPDATE` | Auto-pull, rebuild and restart on new version (default: `false`) |
+| `RESCUE_BOT_TOKEN` | Bot token for the rescue/watchdog bot (see [Rescue Bot](#rescue-bot)) |
 
 ### 3. First run
 
@@ -113,7 +114,10 @@ sudo systemctl restart sophia-bot
 **launchd (macOS):**
 
 ```bash
+# Restart main bot
 launchctl kickstart -k gui/$(id -u)/com.sophia.bot
+# Restart rescue bot
+launchctl kickstart -k gui/$(id -u)/com.sophia.rescue
 ```
 
 **Windows (NSSM):**
@@ -189,6 +193,38 @@ Create `~/Library/LaunchAgents/com.sophia.bot.plist`:
 launchctl load ~/Library/LaunchAgents/com.sophia.bot.plist
 ```
 
+For the rescue bot, create `~/Library/LaunchAgents/com.sophia.rescue.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sophia.rescue</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/sophia/target/release/sophia-rescue</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/sophia</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/sophia-rescue.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/sophia-rescue.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.sophia.rescue.plist
+```
+
 ### Windows
 
 Run in PowerShell:
@@ -224,19 +260,74 @@ nssm start Sophia
 | `/memory clear` | Owner | Clear memory |
 | `/help` | Paired | Show help |
 
+## Rescue Bot
+
+`sophia-rescue` is a companion watchdog binary that lives in the `sophia-rescue/` directory of the same workspace. It is a separate Telegram bot that monitors the main sophia bot and can restart it if something goes wrong.
+
+Built on the same stack (grammers), it runs as its own launchd service (`com.sophia.rescue`).
+
+**Commands:**
+
+| Command | Description |
+|---|---|
+| `/ping` | Check if the rescue bot is alive |
+| `/status` | Show status of the main sophia bot |
+| `/restart` | Restart the main sophia bot via launchd |
+| `/logs` | View recent logs |
+| `/exec` | Run an OS command |
+
+Plain text messages are forwarded to Claude CLI for conversation.
+
+**Setup:**
+
+1. Create a separate bot via [@BotFather](https://t.me/BotFather).
+2. Set `RESCUE_BOT_TOKEN` in your `.env`.
+3. Build: `cargo build --release -p sophia-rescue`
+4. Install the launchd service (see [macOS (launchd)](#macos-launchd)).
+
+## Vector Store
+
+The bot uses [fastembed](https://github.com/Anush008/fastembed-rs) with the `multilingual-e5-small` model (384 dimensions) and [usearch](https://github.com/unum-cloud/usearch) for semantic search over conversation history.
+
+Each incoming message is embedded and stored in `data/vecstore.usearch`. When building context for a response, the bot retrieves the most relevant past conversations, enabling context-aware replies even across long time spans.
+
+## Message Queue
+
+A SQLite-based message queue (`queue.db`) handles deduplication and reliable message processing. Incoming Telegram updates are enqueued before processing, which prevents duplicate handling on restarts and ensures no messages are lost.
+
+## Outbox
+
+Proactive messaging is supported via the outbox mechanism. Drop a JSON file into `data/outbox/` (or use `scripts/send.sh`) to send a message from the bot without an incoming trigger.
+
+```bash
+# Send a message to a specific chat
+./scripts/send.sh <chat_id> "Hello from the outbox"
+```
+
+The bot watches the `data/outbox/` directory and processes any `*.json` files it finds.
+
 ## Architecture
 
 ```
 src/
-  main.rs        — Entry point, auth, update loop, shutdown
-  config.rs      — Config struct, env loading, path constants
-  handlers.rs    — Command dispatch, message processing
-  inference.rs   — Claude CLI subprocess, JSON parsing
-  memory.rs      — Memory, dialogs, system prompt builder
-  pairing.rs     — Paired/pending users (both persistent)
-  queue.rs       — SQLite message queue
-  telegram.rs    — Reactions, send_long, download_media
+  main.rs         — Entry point, auth, update loop, shutdown
+  config.rs       — Config struct, env loading, path constants
+  handlers.rs     — Command dispatch, message processing
+  inference.rs    — Claude CLI subprocess, JSON parsing
+  memory.rs       — Memory, dialogs, system prompt builder
+  pairing.rs      — Paired/pending users (both persistent)
+  queue.rs        — SQLite message queue (dedup, reliable delivery)
+  telegram.rs     — Reactions, send_long, download_media
   update_check.rs — Periodic GitHub release checker
+  outbox.rs       — Proactive message sending via outbox files
+  vecstore.rs     — Embedding + semantic search (fastembed + usearch)
+
+sophia-rescue/
+  src/
+    main.rs       — Entry point, bot auth, update loop
+    config.rs     — Rescue bot config
+    commands.rs   — /ping, /status, /restart, /logs, /exec handlers
+    watchdog.rs   — Main bot health monitoring
 
 data/
   instructions/  — System prompt files (see below)
@@ -244,6 +335,8 @@ data/
   dialogs/       — Per-user per-day conversation logs
   users/         — Pairing data (paired.json, pending.json, owner.json)
   files/         — Downloaded media files
+  outbox/        — Proactive message JSON files
+  vecstore.usearch — Semantic search index
 ```
 
 ### Instruction files
