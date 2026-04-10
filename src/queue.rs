@@ -198,6 +198,20 @@ impl MessageQueue {
         Ok(())
     }
 
+    /// Recover messages stuck in 'processing' for more than `max_age_secs` seconds.
+    pub fn recover_stale(&self, max_age_secs: f64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = now() - max_age_secs;
+        let count = conn.execute(
+            "UPDATE messages SET status = 'failed', updated_at = ?1 WHERE status = 'processing' AND updated_at < ?2",
+            rusqlite::params![now(), cutoff],
+        )?;
+        if count > 0 {
+            info!("Recovered {} stale messages (processing > {}s)", count, max_age_secs);
+        }
+        Ok(count)
+    }
+
     pub fn cleanup(&self, older_than_hours: u64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let cutoff = now() - (older_than_hours as f64 * 3600.0);

@@ -142,6 +142,24 @@ async fn main() -> Result<()> {
         info!("Recovered {} stuck messages from queue", recovered);
     }
 
+    // Periodic recovery sweep for stuck messages
+    {
+        let queue_sweep = queue.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                let q = queue_sweep.clone();
+                match tokio::task::spawn_blocking(move || q.recover_stale(600.0)).await {
+                    Ok(Ok(n)) if n > 0 => info!("Recovery sweep: recovered {} stuck messages", n),
+                    Ok(Err(e)) => error!("Recovery sweep error: {}", e),
+                    Err(e) => error!("Recovery sweep task error: {}", e),
+                    _ => {}
+                }
+            }
+        });
+    }
+
     // Initialize vector store for semantic search
     let vecstore = Arc::new(
         tokio::task::spawn_blocking(|| {

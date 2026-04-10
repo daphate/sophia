@@ -353,7 +353,22 @@ pub async fn ask_claude_streaming(
         let mut full_text = String::new();
         let mut cost_info: Option<CostInfo> = None;
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match tokio::time::timeout(Duration::from_secs(300), lines.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => break, // EOF
+                Ok(Err(e)) => {
+                    let _ = tx.send(StreamEvent::Error(format!("Read error: {}", e))).await;
+                    let _ = child.kill().await;
+                    return;
+                }
+                Err(_) => {
+                    // 5 min with no output
+                    let _ = tx.send(StreamEvent::Error("Claude CLI idle timeout (5 min no output)".to_string())).await;
+                    let _ = child.kill().await;
+                    return;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
@@ -431,8 +446,16 @@ pub async fn ask_claude_streaming(
             }
         }
 
-        // Wait for process to finish
-        let status = child.wait().await;
+        // Wait for process to finish with 10-minute timeout
+        let status = match tokio::time::timeout(Duration::from_secs(600), child.wait()).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Timeout — kill the process
+                let _ = child.kill().await;
+                let _ = tx.send(StreamEvent::Error("Claude CLI timed out after 10 minutes".to_string())).await;
+                return;
+            }
+        };
         if let Ok(st) = &status {
             if !st.success() {
                 let _ = tx

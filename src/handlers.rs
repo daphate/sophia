@@ -180,7 +180,14 @@ async fn handle_private_message(
         .collect::<Vec<_>>()
         .join("\n");
     let chat_id = peer.id.bare_id();
-    let (_id, is_dup) = queue.enqueue(sender_id, chat_id, msg_id, &text, &file_paths_str)?;
+    let (_id, is_dup) = {
+        let queue_clone = queue.clone();
+        let text_clone = text.clone();
+        let fp_clone = file_paths_str.clone();
+        tokio::task::spawn_blocking(move || {
+            queue_clone.enqueue(sender_id, chat_id, msg_id, &text_clone, &fp_clone)
+        }).await??
+    };
     if is_dup {
         info!("Duplicate message msg_id={} from {}, skipping", msg_id, sender_id);
         return Ok(());
@@ -195,7 +202,12 @@ async fn handle_private_message(
     let _guard = lock.lock().await;
 
     // Take all pending messages for this user+chat
-    let msgs = queue.take_batch(sender_id, chat_id)?;
+    let msgs = {
+        let queue_clone = queue.clone();
+        tokio::task::spawn_blocking(move || {
+            queue_clone.take_batch(sender_id, chat_id)
+        }).await??
+    };
     if msgs.is_empty() {
         // Another handler already processed our messages
         return Ok(());
@@ -235,12 +247,22 @@ async fn handle_private_message(
     .await;
 
     // Mark queue entries done/failed
-    for id in queue_ids {
-        if result.is_ok() {
-            let _ = queue.mark_done(id);
-        } else {
-            let _ = queue.mark_failed(id);
-        }
+    let is_ok = result.is_ok();
+    {
+        let queue_clone = queue.clone();
+        tokio::task::spawn_blocking(move || {
+            for id in queue_ids {
+                if is_ok {
+                    if let Err(e) = queue_clone.mark_done(id) {
+                        error!("Failed to mark message {} as done: {}", id, e);
+                    }
+                } else {
+                    if let Err(e) = queue_clone.mark_failed(id) {
+                        error!("Failed to mark message {} as failed: {}", id, e);
+                    }
+                }
+            }
+        }).await.ok();
     }
 
     result
@@ -345,7 +367,7 @@ async fn process_message(
             telegram::react(client, peer, msg_id, "🥶").await;
             error!("Inference failed for msg {}: {}", msg_id, e);
             telegram::send_long(client, peer, "Произошла ошибка при обработке запроса.").await?;
-            return Ok(());
+            return Err(anyhow::anyhow!("Inference failed: {}", e));
         }
     };
 
@@ -451,10 +473,10 @@ async fn process_message(
                 telegram::react(client, peer, msg_id, "🥶").await;
                 error!("Streaming error for msg {}: {}", msg_id, e);
                 if sent_msg_id.is_none() {
-                    telegram::send_long(client, peer, "Произошла ошибка при обработке запроса.")
-                        .await?;
+                    let _ = telegram::send_long(client, peer, "Произошла ошибка при обработке запроса.")
+                        .await;
                 }
-                return Ok(());
+                return Err(anyhow::anyhow!("Streaming error: {}", e));
             }
         }
     }
@@ -470,7 +492,9 @@ async fn process_message(
                 memory::append_memory(update);
             }
         })
-        .await?;
+        .await.unwrap_or_else(|e| {
+            warn!("Failed to save memory updates: {}", e);
+        });
     }
 
     if let Some(cost) = &cost_info {
@@ -517,14 +541,14 @@ async fn process_message(
                     telegram::edit_message(client, peer, edit_id, &display_final[..split_at]).await;
                 let rest = display_final[split_at..].trim_start_matches('\n');
                 if !rest.is_empty() {
-                    telegram::send_long(client, peer, rest).await?;
+                    let _ = telegram::send_long(client, peer, rest).await;
                 }
             }
         }
         None => {
             // Never sent anything (very short response?) — send now
             if !cleaned.trim().is_empty() {
-                telegram::send_long(client, peer, cleaned.trim()).await?;
+                let _ = telegram::send_long(client, peer, cleaned.trim()).await;
             }
         }
     }
@@ -544,7 +568,9 @@ async fn process_message(
                 warn!("Failed to save vecstore index: {}", e);
             }
         })
-        .await?;
+        .await.unwrap_or_else(|e| {
+            warn!("Failed to save dialog/vecstore: {}", e);
+        });
     }
 
     // Done reaction
