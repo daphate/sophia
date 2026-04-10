@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "sophia-rescue"]
+members = [".", "sophia-rescue", "sophia-nexus"]
 resolver = "3"
 
 [package]

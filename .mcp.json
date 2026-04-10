@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "sophia-nexus": {
+      "command": "./target/release/sophia-nexus"
+    }
+  }
+}
