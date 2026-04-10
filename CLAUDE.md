@@ -26,9 +26,34 @@
 - `data/users/` — данные пользователей
 - `data/dialogs/` — диалоги
 
+#### Модули (`src/`)
+- `main.rs` — точка входа, инициализация бота
+- `config.rs` — конфигурация из переменных окружения
+- `format.rs` — конвертация Markdown → Telegram HTML + безопасная нарезка сообщений
+- `handlers.rs` — обработка входящих сообщений
+- `inference.rs` — интеграция с Claude CLI (таймауты: 5 мин idle, 10 мин hard)
+- `memory.rs` — управление памятью и контекстом
+- `outbox.rs` — проактивная отправка сообщений
+- `pairing.rs` — привязка пользователей
+- `queue.rs` — очередь сообщений с автовосстановлением застрявших (sweep каждые 2 мин)
+- `telegram.rs` — слой работы с Telegram API
+- `update_check.rs` — проверка обновлений
+- `vecstore.rs` — векторное хранилище для семантического поиска
+
 ### Команды
 - `cargo build --release` — сборка
 - `./target/release/sophia` — запуск
+
+### Деплой и рестарт
+
+- **macOS (launchd):** `launchctl kickstart -k gui/$(id -u)/com.sophia.bot`
+- **Linux (systemd):** `sudo systemctl restart sophia-bot`
+- **Ручной:** `cargo build --release && ./target/release/sophia`
+
+### Рабочий процесс
+
+- После каждого изменения кода: обновить документацию → commit → push → рестарт
+- Работа идёт через NEXUS-субагентов (София — координатор, не исполнитель)
 
 ## Как я говорю
 
