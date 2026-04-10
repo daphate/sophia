@@ -7,10 +7,10 @@ use sophia::update_check;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use grammers_client::client::{Client, UpdatesConfiguration};
-use grammers_mtsender::SenderPool;
-use grammers_session::storages::SqliteSession;
-use grammers_session::Session;
+use sophia::grammers_client::client::{Client, UpdatesConfiguration};
+use sophia::grammers_mtsender::SenderPool;
+use sophia::grammers_session::storages::SqliteSession;
+use sophia::grammers_session::Session;
 use tokio::sync::broadcast;
 use std::sync::atomic::Ordering;
 use tracing::{debug, error, info};
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     info!("Logged in as {} (ID: {:?})", me_name, me_id);
 
     // Save owner info
-    save_owner(&serde_json::json!({
+    save_owner(&sophia::serde_json::json!({
         "id": config.owner_id,
         "bot_user_id": me_id.bare_id(),
         "bot_name": me_name,
@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
     // Startup notification
     info!("sophia-rescue is running. Press Ctrl+C to stop.");
     {
-        let peer_id = grammers_session::types::PeerId::user_unchecked(config.owner_id);
+        let peer_id = sophia::grammers_session::types::PeerId::user_unchecked(config.owner_id);
         if let Some(peer) = session.peer_ref(peer_id).await {
             let _ = telegram::send_long(&client, peer, "🛟 sophia-rescue перезапустилась").await;
         } else {

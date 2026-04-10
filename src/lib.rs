@@ -10,3 +10,9 @@ pub mod telegram;
 pub mod update_check;
 pub mod vecstore;
 pub mod watchdog;
+
+// Re-export key dependencies for use by sophia-rescue binary
+pub use grammers_client;
+pub use grammers_mtsender;
+pub use grammers_session;
+pub use serde_json;
