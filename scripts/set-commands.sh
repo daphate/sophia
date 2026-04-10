@@ -13,10 +13,10 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
-# Source .env (handle lines with export prefix and skip comments)
+# Source .env
 set -a
 # shellcheck disable=SC1090
-source <(grep -v '^\s*#' "$ENV_FILE" | grep -v '^\s*$' | sed 's/^export //')
+source "$ENV_FILE"
 set +a
 
 COMMANDS='{"commands":[
