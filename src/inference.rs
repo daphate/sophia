@@ -99,9 +99,9 @@ pub async fn ask_claude(
     ]);
     // Isolate bot sessions from interactive Claude Code project
     cmd.current_dir(bot_session_dir());
-    // Bot uses its own API key — never touch CLI's OAuth tokens
-    if let Some(key) = &config.anthropic_api_key {
-        cmd.env("ANTHROPIC_API_KEY", key);
+    // Pass cached OAuth token via env so child never touches ~/.claude/tokens/
+    if let Some(token) = &config.oauth_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
     }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
@@ -346,9 +346,9 @@ pub async fn ask_claude_streaming(
     ]);
     // Isolate bot sessions from interactive Claude Code project
     cmd.current_dir(bot_session_dir());
-    // Bot uses its own API key — never touch CLI's OAuth tokens
-    if let Some(key) = &config.anthropic_api_key {
-        cmd.env("ANTHROPIC_API_KEY", key);
+    // Pass cached OAuth token via env so child never touches ~/.claude/tokens/
+    if let Some(token) = &config.oauth_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
     }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
