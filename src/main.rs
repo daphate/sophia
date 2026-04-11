@@ -155,6 +155,26 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Initialize session store for CLI sessions per user
+    let sessions = sophia::sessions::SessionStore::new(
+        &config::data_dir().join("sessions.db"),
+    ).context("Failed to initialize SessionStore")?;
+    // Expire stale sessions (>24h) and clean up old records (>7d)
+    {
+        let s = sessions.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                let sc = s.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = sc.expire_stale(24);
+                    let _ = sc.cleanup(7);
+                }).await.ok();
+            }
+        });
+    }
+
     // Initialize vector store for semantic search
     let vecstore = Arc::new(
         tokio::task::spawn_blocking(|| {
@@ -333,10 +353,11 @@ async fn main() -> Result<()> {
                         let update_state = update_state.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         let vecstore = Arc::clone(&vecstore);
+                        let sessions = sessions.clone();
                         tokio::spawn(async move {
                             if let Err(e) = handlers::handle_update(
                                 &client, update, &config, me_id, &queue, &user_locks,
-                                &update_state, &shutdown_tx, &vecstore,
+                                &update_state, &shutdown_tx, &vecstore, &sessions,
                             ).await {
                                 error!("Error handling update: {}", e);
                             }

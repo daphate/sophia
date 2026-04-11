@@ -17,6 +17,7 @@ use crate::inference;
 use crate::memory;
 use crate::pairing;
 use crate::queue::MessageQueue;
+use crate::sessions::SessionStore;
 use crate::telegram;
 use crate::update_check::{self, UpdateState};
 
@@ -67,6 +68,7 @@ pub async fn handle_update(
     update_state: &UpdateState,
     shutdown_tx: &broadcast::Sender<()>,
     vecstore: &Arc<VecStore>,
+    sessions: &SessionStore,
 ) -> Result<()> {
     match update {
         Update::NewMessage(message) => {
@@ -100,7 +102,7 @@ pub async fn handle_update(
 
             handle_private_message(
                 client, &message, config, sender_id, me_id, peer, queue, user_locks,
-                update_state, shutdown_tx, vecstore,
+                update_state, shutdown_tx, vecstore, sessions,
             )
             .await
         }
@@ -209,6 +211,7 @@ async fn handle_private_message(
     update_state: &UpdateState,
     shutdown_tx: &broadcast::Sender<()>,
     vecstore: &Arc<VecStore>,
+    sessions: &SessionStore,
 ) -> Result<()> {
     // Skip old messages from catch_up replay (older than 5 minutes)
     let msg_age = chrono::Utc::now().signed_duration_since(message.date());
@@ -378,7 +381,7 @@ async fn handle_private_message(
     };
     let result = process_message(
         client, config, peer, last_msg_id, sender_id, &combined_text, &all_file_paths, vecstore,
-        reply_ctx,
+        reply_ctx, sessions,
     )
     .await;
 
@@ -414,6 +417,7 @@ async fn process_message(
     file_paths: &[PathBuf],
     vecstore: &Arc<VecStore>,
     reply_context: Option<&str>,
+    sessions: &SessionStore,
 ) -> Result<()> {
     // Log user message and index it in vecstore
     {
@@ -495,7 +499,7 @@ async fn process_message(
         Some(file_paths)
     };
     let mut stream = match inference::ask_claude_streaming(
-        sender_id, text, config, paths, &semantic_context, reply_context,
+        sender_id, text, config, sessions, paths, &semantic_context, reply_context,
     ).await {
         Ok(rx) => rx,
         Err(e) => {

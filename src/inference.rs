@@ -5,19 +5,28 @@ use anyhow::Result;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::memory::{build_system_prompt, load_recent_dialog};
+use crate::sessions::SessionStore;
 
-/// Separate working directory for bot's `claude -p` calls so its throwaway
-/// sessions don't pollute the interactive Claude Code project.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Working directory for bot's `claude -p` calls — isolated from the
+/// interactive Claude Code project so sessions don't collide.
 fn bot_session_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let dir = PathBuf::from(home).join("sophia/data/bot-sessions");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct CostInfo {
@@ -42,7 +51,7 @@ pub enum StreamEvent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InferenceError {
-#[error("Claude CLI not found at: {0}")]
+    #[error("Claude CLI not found at: {0}")]
     CliNotFound(String),
     #[error("Claude CLI error (rc={code}): {stderr}")]
     CliError { code: i32, stderr: String },
@@ -52,11 +61,16 @@ pub enum InferenceError {
     Other(#[from] anyhow::Error),
 }
 
+// ---------------------------------------------------------------------------
+// Non-streaming (kept for fallback, currently unused)
+// ---------------------------------------------------------------------------
+
 #[allow(dead_code)]
 pub async fn ask_claude(
     user_id: i64,
     message: &str,
     config: &Config,
+    sessions: &SessionStore,
     file_paths: Option<&[PathBuf]>,
 ) -> Result<(String, Option<CostInfo>), InferenceError> {
     let recent = tokio::task::spawn_blocking({
@@ -86,20 +100,21 @@ pub async fn ask_claude(
     prompt_parts.push(message.to_string());
     let full_message = prompt_parts.join("\n");
 
+    // Session: resume existing or start new
+    let (session_id, is_new) = sessions
+        .get_or_create(config.role, user_id)
+        .map_err(|e| InferenceError::Other(e))?;
+
     let mut cmd = tokio::process::Command::new(&config.claude_cli);
-    cmd.args([
-        "-p",
-        "--output-format",
-        "json",
-        "--verbose",
-        "--no-session-persistence",
-        "--dangerously-skip-permissions",
-        "--system-prompt",
-        &system_prompt,
-    ]);
-    // Isolate bot sessions from interactive Claude Code project
+    cmd.args(["-p", "--output-format", "json", "--verbose",
+              "--dangerously-skip-permissions"]);
+    if is_new {
+        cmd.args(["--session-id", &session_id,
+                   "--system-prompt", &system_prompt]);
+    } else {
+        cmd.args(["--resume", &session_id]);
+    }
     cmd.current_dir(bot_session_dir());
-    // Pass cached OAuth token via env so child never touches ~/.claude/tokens/
     if let Some(token) = &config.oauth_token {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
     }
@@ -115,15 +130,12 @@ pub async fn ask_claude(
         }
     })?;
 
-    // Write to stdin
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(full_message.as_bytes()).await.map_err(|e| {
             InferenceError::Other(anyhow::anyhow!("Failed to write to stdin: {}", e))
         })?;
     }
 
-    // Poll process status every 30s instead of hard timeout.
-    // We read stdout/stderr ourselves so we can poll with try_wait().
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
 
@@ -142,7 +154,6 @@ pub async fn ask_claude(
         buf
     });
 
-    // Poll every 2s for quick responses, log every 30s for long ones.
     let poll_interval = Duration::from_secs(2);
     let mut elapsed_secs: u64 = 0;
     let status = loop {
@@ -152,16 +163,12 @@ pub async fn ask_claude(
                 tokio::time::sleep(poll_interval).await;
                 elapsed_secs += 2;
                 if elapsed_secs % 30 == 0 {
-                    debug!(
-                        "Claude CLI still running after {}s, waiting...",
-                        elapsed_secs
-                    );
+                    debug!("Claude CLI still running after {}s, waiting...", elapsed_secs);
                 }
             }
             Err(e) => {
                 return Err(InferenceError::Other(anyhow::anyhow!(
-                    "Failed to poll Claude CLI: {}",
-                    e
+                    "Failed to poll Claude CLI: {}", e
                 )));
             }
         }
@@ -184,6 +191,9 @@ pub async fn ask_claude(
             &stderr
         };
         error!("Claude CLI error (rc={}): {}", output.status.code().unwrap_or(-1), truncated);
+        if !is_new {
+            sessions.invalidate(config.role, user_id);
+        }
         return Err(InferenceError::CliError {
             code: output.status.code().unwrap_or(-1),
             stderr: truncated.to_string(),
@@ -203,6 +213,10 @@ pub async fn ask_claude(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Output parser
+// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn parse_claude_output(raw: &str) -> Result<(String, Option<CostInfo>)> {
@@ -287,31 +301,55 @@ fn parse_claude_output(raw: &str) -> Result<(String, Option<CostInfo>)> {
     Ok((final_text, cost))
 }
 
-/// Streaming version of ask_claude. Sends text deltas through a channel
-/// as they arrive from the Claude CLI, then sends a Done event with the
-/// full text and cost info.
+// ---------------------------------------------------------------------------
+// Streaming (primary path)
+// ---------------------------------------------------------------------------
+
+/// Streaming inference with per-user persistent CLI sessions.
+///
+/// Each (bot_role, user_id) pair gets its own CLI session tracked in SQLite.
+/// - First message → `--session-id <uuid>` + full system prompt.
+/// - Subsequent  → `--resume <uuid>`, CLI keeps the conversation history.
+/// - On failure the session is invalidated; next call starts fresh.
 pub async fn ask_claude_streaming(
     user_id: i64,
     message: &str,
     config: &Config,
+    sessions: &SessionStore,
     file_paths: Option<&[PathBuf]>,
     semantic_context: &str,
     reply_context: Option<&str>,
 ) -> Result<mpsc::Receiver<StreamEvent>, InferenceError> {
-    let recent = tokio::task::spawn_blocking({
-        let user_id = user_id;
-        move || load_recent_dialog(user_id, 15, 3000)
-    })
-    .await
-    .map_err(|e| InferenceError::Other(e.into()))?;
+    // Session: resume existing or start new
+    let (session_id, is_new) = sessions
+        .get_or_create(config.role, user_id)
+        .map_err(|e| InferenceError::Other(e))?;
 
-    let semantic_ctx = semantic_context.to_string();
-    let system_prompt = tokio::task::spawn_blocking({
-        let recent = recent.clone();
-        move || build_system_prompt(&recent, &semantic_ctx)
-    })
-    .await
-    .map_err(|e| InferenceError::Other(e.into()))?;
+    if is_new {
+        info!("New CLI session {} for user {}", session_id, user_id);
+    } else {
+        info!("Resuming CLI session {} for user {}", session_id, user_id);
+    }
+
+    // System prompt: full on new session, skip on resume (CLI has it)
+    let system_prompt = if is_new {
+        let recent = tokio::task::spawn_blocking({
+            let user_id = user_id;
+            move || load_recent_dialog(user_id, 15, 3000)
+        })
+        .await
+        .map_err(|e| InferenceError::Other(e.into()))?;
+
+        let semantic_ctx = semantic_context.to_string();
+        tokio::task::spawn_blocking({
+            let recent = recent.clone();
+            move || build_system_prompt(&recent, &semantic_ctx)
+        })
+        .await
+        .map_err(|e| InferenceError::Other(e.into()))?
+    } else {
+        String::new()
+    };
 
     // Build prompt with reply context and file references
     let mut prompt_parts = Vec::new();
@@ -332,21 +370,24 @@ pub async fn ask_claude_streaming(
     prompt_parts.push(message.to_string());
     let full_message = prompt_parts.join("\n");
 
+    // Build CLI command
     let mut cmd = tokio::process::Command::new(&config.claude_cli);
     cmd.args([
         "-p",
-        "--output-format",
-        "stream-json",
+        "--output-format", "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--no-session-persistence",
         "--dangerously-skip-permissions",
-        "--system-prompt",
-        &system_prompt,
     ]);
-    // Isolate bot sessions from interactive Claude Code project
+
+    if is_new {
+        cmd.args(["--session-id", &session_id,
+                   "--system-prompt", &system_prompt]);
+    } else {
+        cmd.args(["--resume", &session_id]);
+    }
+
     cmd.current_dir(bot_session_dir());
-    // Pass cached OAuth token via env so child never touches ~/.claude/tokens/
     if let Some(token) = &config.oauth_token {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
     }
@@ -362,7 +403,6 @@ pub async fn ask_claude_streaming(
         }
     })?;
 
-    // Write to stdin
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(full_message.as_bytes()).await.map_err(|e| {
             InferenceError::Other(anyhow::anyhow!("Failed to write to stdin: {}", e))
@@ -375,8 +415,12 @@ pub async fn ask_claude_streaming(
         .ok_or_else(|| InferenceError::Other(anyhow::anyhow!("No stdout from Claude CLI")))?;
 
     let (tx, rx) = mpsc::channel::<StreamEvent>(64);
+    let role = config.role;
+    let uid = user_id;
+    let was_new = is_new;
+    let sessions_clone = sessions.clone();
 
-    // Spawn background task that reads stream-json lines and sends events
+    // Background task: read stream-json lines and forward events
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -384,18 +428,25 @@ pub async fn ask_claude_streaming(
         let mut cost_info: Option<CostInfo> = None;
 
         loop {
-            let line = match tokio::time::timeout(Duration::from_secs(300), lines.next_line()).await {
+            let line = match tokio::time::timeout(Duration::from_secs(300), lines.next_line()).await
+            {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => break, // EOF
                 Ok(Err(e)) => {
-                    let _ = tx.send(StreamEvent::Error(format!("Read error: {}", e))).await;
+                    let _ = tx
+                        .send(StreamEvent::Error(format!("Read error: {}", e)))
+                        .await;
                     let _ = child.kill().await;
                     return;
                 }
                 Err(_) => {
-                    // 5 min with no output
-                    let _ = tx.send(StreamEvent::Error("Claude CLI idle timeout (5 min no output)".to_string())).await;
+                    let _ = tx
+                        .send(StreamEvent::Error(
+                            "Claude CLI idle timeout (5 min no output)".to_string(),
+                        ))
+                        .await;
                     let _ = child.kill().await;
+                    sessions_clone.invalidate(role, uid);
                     return;
                 }
             };
@@ -426,11 +477,12 @@ pub async fn ask_claude_streaming(
                                         delta.get("text").and_then(|v| v.as_str())
                                     {
                                         full_text.push_str(text);
-                                        if tx.send(StreamEvent::TextDelta(text.to_string()))
+                                        if tx
+                                            .send(StreamEvent::TextDelta(text.to_string()))
                                             .await
                                             .is_err()
                                         {
-                                            break; // receiver dropped
+                                            break;
                                         }
                                     }
                                 }
@@ -439,7 +491,6 @@ pub async fn ask_claude_streaming(
                     }
                 }
                 "result" => {
-                    // Extract final text from result if available
                     if let Some(r) = parsed.get("result").and_then(|v| v.as_str()) {
                         full_text = r.to_string();
                     }
@@ -447,25 +498,15 @@ pub async fn ask_claude_streaming(
                         .get("usage")
                         .and_then(|u| u.get("input_tokens"))
                         .and_then(|v| v.as_u64())
-                        .or_else(|| {
-                            parsed
-                                .get("total_input_tokens")
-                                .and_then(|v| v.as_u64())
-                        })
+                        .or_else(|| parsed.get("total_input_tokens").and_then(|v| v.as_u64()))
                         .unwrap_or(0);
                     let total_output = parsed
                         .get("usage")
                         .and_then(|u| u.get("output_tokens"))
                         .and_then(|v| v.as_u64())
-                        .or_else(|| {
-                            parsed
-                                .get("total_output_tokens")
-                                .and_then(|v| v.as_u64())
-                        })
+                        .or_else(|| parsed.get("total_output_tokens").and_then(|v| v.as_u64()))
                         .unwrap_or(0);
-                    let cost_usd = parsed
-                        .get("total_cost_usd")
-                        .and_then(|v| v.as_f64());
+                    let cost_usd = parsed.get("total_cost_usd").and_then(|v| v.as_f64());
                     cost_info = Some(CostInfo {
                         input_tokens: total_input,
                         output_tokens: total_output,
@@ -480,14 +521,21 @@ pub async fn ask_claude_streaming(
         let status = match tokio::time::timeout(Duration::from_secs(600), child.wait()).await {
             Ok(result) => result,
             Err(_) => {
-                // Timeout — kill the process
                 let _ = child.kill().await;
-                let _ = tx.send(StreamEvent::Error("Claude CLI timed out after 10 minutes".to_string())).await;
+                let _ = tx
+                    .send(StreamEvent::Error(
+                        "Claude CLI timed out after 10 minutes".to_string(),
+                    ))
+                    .await;
+                sessions_clone.invalidate(role, uid);
                 return;
             }
         };
         if let Ok(st) = &status {
             if !st.success() {
+                if !was_new {
+                    sessions_clone.invalidate(role, uid);
+                }
                 let _ = tx
                     .send(StreamEvent::Error(format!(
                         "Claude CLI exited with code {}",

@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "sophia"
-version = "1.0.1-beta"
+version = "1.0.2-beta"
 edition = "2024"
 
 [lib]
@@ -38,3 +38,4 @@ semver = "1"
 pulldown-cmark = "0.12"
 usearch = "2"
 fastembed = "5"
+uuid = { version = "1", features = ["v4"] }

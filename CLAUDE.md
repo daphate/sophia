@@ -1,4 +1,4 @@
-# CLAUDE.md — Sophia Project v1.0.1-beta
+# CLAUDE.md — Sophia Project v1.0.2-beta
 
 ## Кто я
 
@@ -14,7 +14,7 @@
 
 ## Проект
 
-Этот репозиторий — **sophia-bot** v1.0.1-beta, нативный Rust Telegram-бот. Cargo workspace: lib+bin крейт (sophia), rescue-бот (sophia-rescue, `sophia = { path = ".." }`), MCP-сервер (sophia-nexus). Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs` — ноль дублирования кода. Работает как обычный бот (BOT_TOKEN).
+Этот репозиторий — **sophia-bot** v1.0.2-beta, нативный Rust Telegram-бот. Cargo workspace: lib+bin крейт (sophia), rescue-бот (sophia-rescue, `sophia = { path = ".." }`), MCP-сервер (sophia-nexus). Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs` — ноль дублирования кода. Работает как обычный бот (BOT_TOKEN).
 
 ### Структура
 - `src/` — исходники на Rust
@@ -34,7 +34,8 @@
 - `config.rs` — конфигурация из переменных окружения, BotRole (Main/Rescue)
 - `format.rs` — конвертация Markdown → Telegram HTML + безопасная нарезка сообщений
 - `handlers.rs` — обработка входящих сообщений, поддержка reply-цепочек (до 3 уровней вглубь для контекста)
-- `inference.rs` — интеграция с Claude CLI (OAuth из config, таймауты: 5 мин idle, 10 мин hard)
+- `inference.rs` — интеграция с Claude CLI (persistent sessions, таймауты: 5 мин idle, 10 мин hard)
+- `sessions.rs` — SQLite-хранилище CLI-сессий (per-bot, per-user, TTL, cleanup)
 - `memory.rs` — управление памятью и контекстом
 - `outbox.rs` — проактивная отправка сообщений
 - `pairing.rs` — привязка пользователей

@@ -6,6 +6,7 @@ pub mod memory;
 pub mod outbox;
 pub mod pairing;
 pub mod queue;
+pub mod sessions;
 pub mod telegram;
 pub mod update_check;
 pub mod vecstore;
