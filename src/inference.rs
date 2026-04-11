@@ -115,9 +115,6 @@ pub async fn ask_claude(
         cmd.args(["--resume", &session_id]);
     }
     cmd.current_dir(bot_session_dir());
-    if let Some(token) = &config.oauth_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -388,9 +385,6 @@ pub async fn ask_claude_streaming(
     }
 
     cmd.current_dir(bot_session_dir());
-    if let Some(token) = &config.oauth_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());

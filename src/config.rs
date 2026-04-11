@@ -25,10 +25,6 @@ pub struct Config {
     pub mode: BotMode,
     pub owner_id: i64,
     pub claude_cli: String,
-    /// OAuth token read once at startup from ~/.claude/tokens/ (annual or session).
-    /// Passed to child `claude -p` via CLAUDE_CODE_OAUTH_TOKEN so they never
-    /// touch the token files themselves — no race with interactive CLI.
-    pub oauth_token: Option<String>,
     #[allow(dead_code)]
     pub inference_timeout: u64,
     pub session_name: String,
@@ -99,7 +95,6 @@ impl Config {
             .context("OWNER_ID must be an integer")?;
 
         let claude_cli = std::env::var("CLAUDE_CLI").unwrap_or_else(|_| "claude".into());
-        let oauth_token = read_oauth_token();
         let inference_timeout: u64 = std::env::var("INFERENCE_TIMEOUT")
             .unwrap_or_else(|_| "150".into())
             .parse()
@@ -132,7 +127,6 @@ impl Config {
             mode: BotMode::Bot { token: String::new() }, // placeholder, overwritten by caller
             owner_id,
             claude_cli,
-            oauth_token,
             inference_timeout,
             session_name,
             exec_enabled,
@@ -143,22 +137,6 @@ impl Config {
             peer_service: String::new(), // overwritten by caller
         })
     }
-}
-
-/// Read OAuth token from ~/.claude/tokens/ once at startup.
-/// Prefers "annual" (long-lived), falls back to "session".
-fn read_oauth_token() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::path::Path::new(&home).join(".claude/tokens");
-    for name in &["annual", "session"] {
-        if let Ok(token) = std::fs::read_to_string(base.join(name)) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Some(token);
-            }
-        }
-    }
-    None
 }
 
 /// Project root: current working directory.
