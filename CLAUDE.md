@@ -1,4 +1,4 @@
-# CLAUDE.md — Sophia Project v1.0-beta
+# CLAUDE.md — Sophia Project v1.0.1-beta
 
 ## Кто я
 
@@ -14,7 +14,7 @@
 
 ## Проект
 
-Этот репозиторий — **sophia-bot** v1.0-beta, нативный Rust Telegram-бот. Cargo workspace: lib+bin крейт (sophia), rescue-бот (sophia-rescue, `sophia = { path = ".." }`), MCP-сервер (sophia-nexus). Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs` — ноль дублирования кода. Работает как обычный бот (BOT_TOKEN).
+Этот репозиторий — **sophia-bot** v1.0.1-beta, нативный Rust Telegram-бот. Cargo workspace: lib+bin крейт (sophia), rescue-бот (sophia-rescue, `sophia = { path = ".." }`), MCP-сервер (sophia-nexus). Два бинарника (основной + rescue) на общей библиотеке `src/lib.rs` — ноль дублирования кода. Работает как обычный бот (BOT_TOKEN).
 
 ### Структура
 - `src/` — исходники на Rust

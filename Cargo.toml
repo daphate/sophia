@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "sophia"
-version = "1.0.0-beta"
+version = "1.0.1-beta"
 edition = "2024"
 
 [lib]
