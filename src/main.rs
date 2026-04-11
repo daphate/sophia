@@ -1,11 +1,8 @@
 use sophia::config;
 use sophia::handlers;
 use sophia::outbox;
-use sophia::pairing;
-use sophia::queue;
 use sophia::telegram;
 use sophia::update_check;
-use sophia::vecstore;
 
 use std::io::{self, BufRead, Write as _};
 use std::sync::Arc;

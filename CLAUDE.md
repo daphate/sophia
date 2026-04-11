@@ -34,7 +34,7 @@
 - `config.rs` — конфигурация из переменных окружения, BotRole (Main/Rescue)
 - `format.rs` — конвертация Markdown → Telegram HTML + безопасная нарезка сообщений
 - `handlers.rs` — обработка входящих сообщений, поддержка reply-цепочек (до 3 уровней вглубь для контекста)
-- `inference.rs` — интеграция с Claude CLI (таймауты: 5 мин idle, 10 мин hard)
+- `inference.rs` — интеграция с Claude CLI (ANTHROPIC_API_KEY, таймауты: 5 мин idle, 10 мин hard)
 - `memory.rs` — управление памятью и контекстом
 - `outbox.rs` — проактивная отправка сообщений
 - `pairing.rs` — привязка пользователей

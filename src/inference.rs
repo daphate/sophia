@@ -10,9 +10,6 @@ use tracing::{debug, error, warn};
 use crate::config::Config;
 use crate::memory::{build_system_prompt, load_recent_dialog};
 
-/// Read the freshest OAuth token from ~/.claude/tokens/ so child `claude -p`
-/// processes use it via env var instead of touching token files themselves.
-/// This prevents refresh-token race conditions with the interactive session.
 /// Separate working directory for bot's `claude -p` calls so its throwaway
 /// sessions don't pollute the interactive Claude Code project.
 fn bot_session_dir() -> PathBuf {
@@ -20,21 +17,6 @@ fn bot_session_dir() -> PathBuf {
     let dir = PathBuf::from(home).join("sophia/data/bot-sessions");
     let _ = std::fs::create_dir_all(&dir);
     dir
-}
-
-fn read_oauth_token() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::path::Path::new(&home).join(".claude/tokens");
-    // Prefer "annual" (long-lived), fall back to "session"
-    for name in &["annual", "session"] {
-        if let Ok(token) = std::fs::read_to_string(base.join(name)) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Some(token);
-            }
-        }
-    }
-    None
 }
 
 #[derive(Debug)]
@@ -117,9 +99,9 @@ pub async fn ask_claude(
     ]);
     // Isolate bot sessions from interactive Claude Code project
     cmd.current_dir(bot_session_dir());
-    // Pass fresh OAuth token via env so the child doesn't touch ~/.claude/tokens/
-    if let Some(token) = read_oauth_token() {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    // Bot uses its own API key — never touch CLI's OAuth tokens
+    if let Some(key) = &config.anthropic_api_key {
+        cmd.env("ANTHROPIC_API_KEY", key);
     }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
@@ -364,9 +346,9 @@ pub async fn ask_claude_streaming(
     ]);
     // Isolate bot sessions from interactive Claude Code project
     cmd.current_dir(bot_session_dir());
-    // Pass fresh OAuth token via env so the child doesn't touch ~/.claude/tokens/
-    if let Some(token) = read_oauth_token() {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    // Bot uses its own API key — never touch CLI's OAuth tokens
+    if let Some(key) = &config.anthropic_api_key {
+        cmd.env("ANTHROPIC_API_KEY", key);
     }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
