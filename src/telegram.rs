@@ -119,8 +119,8 @@ pub async fn download_media(
         None => return Ok(vec![]),
     };
 
-    // Create user directory
-    let user_dir = config::files_dir().join(sender_id.to_string());
+    // Create per-user download directory (~/Downloads/sophia/{user_id}/)
+    let user_dir = config::downloads_dir().join(sender_id.to_string());
     std::fs::create_dir_all(&user_dir)?;
 
     let ts = SystemTime::now()

@@ -186,8 +186,22 @@ pub fn users_dir() -> PathBuf {
     data_dir().join("users")
 }
 
+/// User-uploaded files from Telegram (media, documents).
+pub fn downloads_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join("Downloads/sophia")
+}
+
+/// Bot work results (generated documents, reports, exports).
+pub fn documents_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join("Documents/sophia")
+}
+
+/// Legacy alias — use downloads_dir() for new code.
+#[deprecated(note = "use downloads_dir() instead")]
 pub fn files_dir() -> PathBuf {
-    data_dir().join("files")
+    downloads_dir()
 }
 
 pub fn owner_file() -> PathBuf {
