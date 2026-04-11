@@ -10,9 +10,15 @@ data/instructions/MEMORY.md
 data/instructions/TOOLS.md
 data/files/
 data/queue.db*
+data/queue_rescue.db*
+data/sessions.db*
+data/sessions_rescue.db*
+data/vecstore.usearch
+data/projects/
 data/bot-sessions/
 .claude/
 target/
+figma-plugin/
 # Build artifacts and caches
 .fastembed_cache/
 data/models/

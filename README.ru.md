@@ -1,6 +1,6 @@
-# Sophia Bot v1.0-beta
+# Sophia Bot v1.0.4-beta
 
-> Дата релиза: 2026-04-09
+> Дата релиза: 2026-04-12
 
 Telegram-бот на базе Claude CLI. Написан на Rust. Два бинарника (основной + rescue), использующие общую библиотеку.
 
@@ -312,6 +312,7 @@ src/
   outbox.rs       — Проактивная отправка сообщений через outbox
   pairing.rs      — Спаренные/ожидающие пользователи (оба persistent)
   queue.rs        — SQLite очередь сообщений с дедупликацией
+  sessions.rs     — SQLite-хранилище CLI-сессий (per-bot, per-user, TTL, cleanup)
   telegram.rs     — Реакции, отправка длинных сообщений, скачивание медиа
   update_check.rs — Периодическая проверка обновлений на GitHub
   vecstore.rs     — Векторное хранилище (fastembed + usearch)
@@ -324,12 +325,19 @@ sophia-nexus/src/
   main.rs         — MCP-сервер для интеграции с Claude Code
 
 data/
-  instructions/   — Файлы системного промпта (см. ниже)
-  memory/         — Рантайм-память (авто через [MEMORY_UPDATE] теги)
-  dialogs/        — Логи диалогов по пользователям и дням
-  users/          — Данные пейринга (paired.json, pending.json, owner.json)
-  files/          — Скачанные медиафайлы
-  outbox/         — JSON-файлы исходящих сообщений
+  instructions/    — Файлы системного промпта (см. ниже)
+  memory/          — Рантайм-память (авто через [MEMORY_UPDATE] теги)
+  dialogs/         — Логи диалогов по пользователям и дням
+  users/           — Данные пейринга (paired.json, pending.json, owner.json)
+  files/           — Скачанные медиафайлы
+  outbox/          — JSON-файлы исходящих сообщений
+  bot-sessions/    — Рабочая директория Claude CLI (состояние сессий)
+  queue.db         — SQLite-очередь сообщений (основной бот)
+  queue_rescue.db  — SQLite-очередь сообщений (rescue-бот)
+  sessions.db      — Хранилище CLI-сессий (основной бот)
+  sessions_rescue.db — Хранилище CLI-сессий (rescue-бот)
+  vecstore.db      — Метаданные векторного хранилища
+  vecstore.usearch — Индекс семантического поиска (usearch)
 ```
 
 ### Файлы инструкций

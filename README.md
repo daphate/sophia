@@ -1,6 +1,6 @@
-# Sophia Bot v1.0-beta
+# Sophia Bot v1.0.4-beta
 
-> Release date: 2026-04-09
+> Release date: 2026-04-12
 
 Telegram bot powered by Claude CLI. Written in Rust. Ships two binaries (main + rescue) that share a common library crate.
 
@@ -319,6 +319,7 @@ src/
   memory.rs       — Memory, dialogs, system prompt builder
   pairing.rs      — Paired/pending users (both persistent)
   queue.rs        — SQLite message queue (dedup, reliable delivery)
+  sessions.rs     — SQLite CLI session store (per-bot, per-user, TTL, cleanup)
   telegram.rs     — Reactions, send_long, download_media
   update_check.rs — Periodic GitHub release checker
   outbox.rs       — Proactive message sending via outbox files
@@ -334,13 +335,19 @@ sophia-nexus/
     main.rs       — MCP server for Claude Code integration
 
 data/
-  instructions/  — System prompt files (see below)
-  memory/        — Runtime memory (auto-managed via [MEMORY_UPDATE] tags)
-  dialogs/       — Per-user per-day conversation logs
-  users/         — Pairing data (paired.json, pending.json, owner.json)
-  files/         — Downloaded media files
-  outbox/        — Proactive message JSON files
-  vecstore.usearch — Semantic search index
+  instructions/    — System prompt files (see below)
+  memory/          — Runtime memory (auto-managed via [MEMORY_UPDATE] tags)
+  dialogs/         — Per-user per-day conversation logs
+  users/           — Pairing data (paired.json, pending.json, owner.json)
+  files/           — Downloaded media files
+  outbox/          — Proactive message JSON files
+  bot-sessions/    — Claude CLI working directory (per-session state)
+  queue.db         — SQLite message queue (main bot)
+  queue_rescue.db  — SQLite message queue (rescue bot)
+  sessions.db      — CLI session store (main bot)
+  sessions_rescue.db — CLI session store (rescue bot)
+  vecstore.db      — Vector store metadata
+  vecstore.usearch — Semantic search index (usearch)
 ```
 
 ### Instruction files

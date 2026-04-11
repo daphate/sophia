@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "sophia"
-version = "1.0.0-beta"
+version = "1.0.4-beta"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3594,6 +3594,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "usearch",
+ "uuid",
 ]
 
 [[package]]
